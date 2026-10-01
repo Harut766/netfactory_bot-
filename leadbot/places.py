@@ -108,3 +108,25 @@ async def monthly_usage(session: aiohttp.ClientSession, token: str) -> float | N
         return float(data["current"]["monthlyUsageUsd"])
     except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError, KeyError, TypeError, ValueError):
         return None
+
+
+async def past_places(session: aiohttp.ClientSession, token: str, max_runs: int = 50) -> list[Place]:
+    """Places from earlier scraper runs that Apify still keeps. Reading them costs nothing new."""
+    timeout = aiohttp.ClientTimeout(total=120)
+    async with session.get(f"{API}/acts/{ACTOR}/runs", params={"token": token, "desc": "1", "limit": str(max_runs)},
+                           timeout=timeout) as r:
+        runs = (await _json(r))["data"]["items"]
+    found: dict[str, Place] = {}
+    for run in runs:
+        if not run.get("defaultDatasetId") or run.get("status") in ("READY", "RUNNING"):
+            continue
+        async with session.get(f"{API}/datasets/{run['defaultDatasetId']}/items",
+                               params={"token": token, "clean": "true"}, timeout=timeout) as r:
+            if r.status >= 300:
+                # Expired by the retention period.
+                continue
+            items = await r.json(content_type=None)
+        for p in map(parse_place, items if isinstance(items, list) else []):
+            if p:
+                found.setdefault(p.id, p)
+    return list(found.values())

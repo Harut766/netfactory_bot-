@@ -425,3 +425,38 @@ def test_migrates_old_leads_table(tmp_path):
     db.add_lead("p2", None, {}, 5, "r", "i", "m")
     db.add_lead("p3", None, {}, 5, "r", "i", "m")
     assert db.lead(3)["instagram"] is None
+
+
+def test_recover_paid_places(monkeypatch):
+    db = DB(":memory:")
+    db.add_lead("p1", "shop", {}, 8, "r", "i", "m")
+    db.mark_place("p2", "no_instagram")  # dropped by an older version
+    items = [(f"p{i}", {"id": f"p{i}"}) for i in (1, 2, 3)]
+    assert db.recover(items) == 2
+    assert not db.place_checked("p2")
+    assert [db.pop_pending()["id"], db.pop_pending()["id"], db.pop_pending()] == ["p2", "p3", None]
+
+
+def test_find_leads_without_buying(monkeypatch):
+    import asyncio
+
+    async def no_search(*args, **kwargs):
+        raise AssertionError("must not buy")
+
+    monkeypatch.setattr(places, "search", no_search)
+
+    async def fake_evaluate(session, key, models, ctx, today):
+        return llm.Verdict(fit=True, score=7, reason="r", idea="i", message="Բարև")
+
+    monkeypatch.setattr(llm, "evaluate", fake_evaluate)
+    db = DB(":memory:")
+    db.add_pending([("p1", vars(_fake_place(1)))])
+
+    async def notify(text):
+        pass
+
+    async def collect():
+        return [x async for x in pipeline.find_leads(cfg(), db, None, 5, lambda: False, notify, "2026-10-01",
+                                                     buy_more=False)]
+
+    assert len(asyncio.run(collect())) == 1

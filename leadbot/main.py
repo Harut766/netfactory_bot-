@@ -2,6 +2,7 @@ import asyncio
 import html
 import logging
 import re
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -149,14 +150,19 @@ async def refresh_card(call: CallbackQuery, lead_id: int) -> None:
 
 # ---------- searching ----------
 
-async def run(bot: Bot, chat_id: int, want: int) -> None:
+async def run(bot: Bot, chat_id: int, want: int, recover: bool = False) -> None:
+    """Finds up to `want` leads. With `recover`, instead re-reads places bought in earlier Apify runs that
+    never became cards, and sends cards for all of them without buying anything."""
     global cancel_requested
     if run_lock.locked():
         await bot.send_message(chat_id, "⏳ Поиск уже идёт. /stop — остановить.")
         return
     async with run_lock:
         cancel_requested = False
-        status = await bot.send_message(chat_id, f"🔎 Ищу до {want} лидов… Это займёт 5–20 минут.")
+        if recover:
+            status = await bot.send_message(chat_id, "♻️ Забираю уже оплаченные компании из прошлых запусков Apify…")
+        else:
+            status = await bot.send_message(chat_id, f"🔎 Ищу до {want} лидов… Это займёт 5–20 минут.")
         found = 0
 
         async def notify(text: str) -> None:
@@ -165,7 +171,14 @@ async def run(bot: Bot, chat_id: int, want: int) -> None:
         try:
             async with aiohttp.ClientSession(trust_env=True) as session:
                 today = datetime.now(ZoneInfo(cfg.timezone)).date().isoformat()
-                leads = pipeline.find_leads(cfg, db, session, want, lambda: cancel_requested, notify, today)
+                if recover:
+                    past = await places.past_places(session, cfg.apify_token)
+                    added = db.recover([(p.id, asdict(p)) for p in past])
+                    want = db.pending_count()
+                    await notify(f"♻️ В прошлых запусках Apify: {len(past)} компаний, из них без карточки: {added}. "
+                                 f"Готовлю {want} карточек, новые компании не покупаю.")
+                leads = pipeline.find_leads(cfg, db, session, want, lambda: cancel_requested, notify, today,
+                                            buy_more=not recover)
                 async for lead in leads:
                     await send_card(bot, chat_id, lead.id)
                     found += 1
@@ -228,6 +241,7 @@ async def start(message: Message) -> None:
         f"Лиды приходят {schedule} (до {cfg.daily_leads} шт., в пределах бесплатного лимита Apify).\n"
         "Под каждым лидом: ✅ Отправил · 🔄 Другой текст · ❌ Не подходит.\n\n"
         "/leads — найти лиды сейчас (/leads 5 — пять штук)\n"
+        "/recover — карточки по компаниям, уже оплаченным в Apify раньше\n"
         "/stop — остановить поиск\n"
         "/stats — статистика\n"
         f"/id — ID этого чата (сейчас: <code>{message.chat.id}</code>)"
@@ -248,6 +262,13 @@ async def leads_now(message: Message, command: CommandObject, bot: Bot) -> None:
             return
         want = int(command.args)
     task = asyncio.create_task(run(bot, message.chat.id, want))
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+
+
+@router.message(Command("recover"))
+async def recover(message: Message, bot: Bot) -> None:
+    task = asyncio.create_task(run(bot, message.chat.id, 0, recover=True))
     tasks.add(task)
     task.add_done_callback(tasks.discard)
 
@@ -337,6 +358,7 @@ async def main() -> None:
     dp.include_routers(router, denied)
     await bot.set_my_commands([
         BotCommand(command="leads", description="Найти лиды сейчас"),
+        BotCommand(command="recover", description="Карточки по уже оплаченным компаниям"),
         BotCommand(command="stop", description="Остановить поиск"),
         BotCommand(command="stats", description="Статистика"),
         BotCommand(command="start", description="Как пользоваться"),

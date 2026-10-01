@@ -72,9 +72,11 @@ async def find_leads(
     is_cancelled: Callable[[], bool],
     notify: Callable[[str], Awaitable[None]],
     today: str,
+    buy_more: bool = True,
 ) -> AsyncIterator[Lead]:
     """Yields up to `want` lead cards. Every place bought on Apify becomes a card (or waits in the pending
-    queue for the next run); `today` is the local date the Apify budget is counted for."""
+    queue for the next run); `today` is the local date the Apify budget is counted for. Without `buy_more`
+    only the pending queue is processed."""
     ig = instagram.InstagramClient(session, cfg.apify_token if cfg.apify_instagram else "", cfg.meta_token,
                                    cfg.meta_ig_id, cfg.meta_api_version)
     found = llm_errors = restarts = 0
@@ -130,7 +132,7 @@ async def find_leads(
             raise Cancelled
         raw = db.pop_pending()
         if raw is None:
-            if not await buy(want - found):
+            if not buy_more or not await buy(want - found):
                 return
             continue
         place = places.Place(**raw)

@@ -134,6 +134,21 @@ class DB:
             self.conn.execute("DELETE FROM pending WHERE position = ?", (row["position"],))
         return json.loads(row["data"])
 
+    def recover(self, items: list[tuple[str, dict]]) -> int:
+        """Queues places bought earlier that never became a card (older versions dropped them). Returns how many."""
+        added = 0
+        with self.conn:
+            for pid, data in items:
+                if self.conn.execute("SELECT 1 FROM leads WHERE place_id = ?", (pid,)).fetchone():
+                    continue
+                self.conn.execute("DELETE FROM places WHERE id = ?", (pid,))
+                cur = self.conn.execute(
+                    "INSERT OR IGNORE INTO pending(place_id, data) VALUES (?, ?)",
+                    (pid, json.dumps(data, ensure_ascii=False)),
+                )
+                added += cur.rowcount
+        return added
+
     def pending_count(self) -> int:
         return self.conn.execute("SELECT COUNT(*) FROM pending").fetchone()[0]
 

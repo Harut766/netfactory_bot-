@@ -8,6 +8,12 @@ import aiohttp
 API = "https://api.apify.com/v2"
 ACTOR = "compass~crawler-google-places"
 RUN_TIMEOUT = 900
+# Apify refuses a per-run charge cap below this.
+MIN_CHARGE_USD = 0.5
+
+
+class StartError(RuntimeError):
+    """Apify refused to start the run, so nothing was charged."""
 
 
 @dataclass
@@ -54,7 +60,7 @@ async def _json(r: aiohttp.ClientResponse) -> dict:
 async def search(session: aiohttp.ClientSession, token: str, queries: list[str], per_query: int,
                  max_charge_usd: float) -> list[Place]:
     """Runs the scraper once for several queries (one run = one start fee) and returns the places."""
-    params = {"token": token, "maxTotalChargeUsd": f"{max_charge_usd:.2f}"}
+    params = {"token": token, "maxTotalChargeUsd": f"{max(max_charge_usd, MIN_CHARGE_USD):.2f}"}
     body = {
         "searchStringsArray": queries,
         "maxCrawledPlacesPerSearch": per_query,
@@ -68,7 +74,10 @@ async def search(session: aiohttp.ClientSession, token: str, queries: list[str],
     }
     timeout = aiohttp.ClientTimeout(total=60)
     async with session.post(f"{API}/acts/{ACTOR}/runs", params=params, json=body, timeout=timeout) as r:
-        run = (await _json(r))["data"]
+        try:
+            run = (await _json(r))["data"]
+        except RuntimeError as e:
+            raise StartError(str(e)) from None
     loop = asyncio.get_running_loop()
     deadline = loop.time() + RUN_TIMEOUT
     while run["status"] in ("READY", "RUNNING"):

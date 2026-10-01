@@ -99,11 +99,17 @@ async def find_leads(
                 return
             db.restart_queries()
             continue
-        # Counted before the run: even a failed run may have been charged.
+        try:
+            # ~$5 per 1000 places on the free plan, plus a margin for the start fee.
+            batch = await places.search(session, cfg.apify_token, queries, per_query,
+                                        max_charge_usd=0.05 + per_query * len(queries) * 0.008)
+        except places.StartError:
+            raise
+        except Exception:
+            # The run started, so it may have been charged even though it failed.
+            db.add_places_bought(today, per_query * len(queries))
+            raise
         db.add_places_bought(today, per_query * len(queries))
-        # ~$5 per 1000 places on the free plan, plus a margin for the start fee.
-        batch = await places.search(session, cfg.apify_token, queries, per_query,
-                                    max_charge_usd=0.05 + per_query * len(queries) * 0.008)
         db.finish_queries(queries)
 
         for place in batch:

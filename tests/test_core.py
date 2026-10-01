@@ -272,3 +272,29 @@ def test_find_leads_stops_when_month_budget_spent(monkeypatch):
     db, leads, calls, notes = _run_find_leads(monkeypatch, [], usage=4.9)
     assert leads == [] and calls == []
     assert any("лимит Apify на этот месяц" in n for n in notes)
+
+
+def test_refused_apify_start_does_not_spend_budget(monkeypatch):
+    import asyncio
+
+    async def refused(*args, **kwargs):
+        raise places.StartError("Apify 400")
+
+    async def fake_usage(session, token):
+        return 0.0
+
+    monkeypatch.setattr(places, "search", refused)
+    monkeypatch.setattr(places, "monthly_usage", fake_usage)
+    db = DB(":memory:")
+    db.sync_queries(["q0"])
+
+    async def notify(text):
+        pass
+
+    async def collect():
+        return [x async for x in pipeline.find_leads(cfg(), db, None, 3, lambda: False, notify, "2026-10-01")]
+
+    with pytest.raises(places.StartError):
+        asyncio.run(collect())
+    assert db.places_bought("2026-10-01") == 0
+    assert db.next_queries(1) == ["q0"]

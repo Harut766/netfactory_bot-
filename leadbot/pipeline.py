@@ -179,6 +179,7 @@ async def find_leads(
                 db.mark_place(place.id, "has_web_app" if verdict.has_web_app else "not_fit")
                 continue
 
+            context["web_presence"] = verdict.web_presence
             lead_id = db.add_lead(place.id, handle, context, verdict.score, verdict.reason, verdict.idea,
                                   verdict.message, verdict.summary)
             found += 1

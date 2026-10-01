@@ -174,9 +174,11 @@ def test_format_card_escapes():
         "status": "new", "handled_by": None,
         "context": {"name": "A&B", "category": "Cafe", "instagram": "shop", "ig_checked": True,
                     "followers": 10, "posts": 5, "last_post": NOW.date().isoformat(), "first_post": None,
-                    "website": "https://ab.am", "rating": 4.8, "google_reviews": 20},
+                    "website": "https://ab.am", "rating": 4.8, "google_reviews": 20,
+                    "web_presence": "только Instagram, своего приложения нет"},
     }
     text = format_card(lead)
+    assert "Веб-приложение:</b> только Instagram" in text
     assert "A&amp;B" in text and "Բարև &lt;Ձեզ&gt;" in text and "a &lt; b" in text
     assert len(card_keyboard(lead).inline_keyboard) == 2
     lead["status"], lead["handled_by"] = "sent", "@me"
@@ -210,7 +212,7 @@ def _run_find_leads(monkeypatch, batch, want=5, usage=0.0, config=None):
         has_app = ctx["instagram"] == "hasapp"
         fit = ctx["instagram"] not in ("notfit", "hasapp")
         return llm.Verdict(fit=fit, score=8 if fit else 2, reason="r", idea="i", message="Բարև" if fit else "",
-                           summary="s", has_web_app=has_app)
+                           summary="s", has_web_app=has_app, web_presence="w")
 
     monkeypatch.setattr(places, "search", fake_search)
     monkeypatch.setattr(places, "monthly_usage", fake_usage)
@@ -246,6 +248,7 @@ def test_find_leads(monkeypatch):
     # Without filters, only the businesses with their own web app (and non-businesses) are dropped.
     assert [db.lead(lead.id)["instagram"] for lead in leads] == ["old", "inactive", "good"]
     assert db.lead(leads[0].id)["summary"] == "s"
+    assert db.lead(leads[0].id)["context"]["web_presence"] == "w"
     s = db.stats("2000-01-01")["places"]
     assert s == {"lead": 3, "no_instagram": 1, "not_fit": 1, "duplicate": 1, "has_web_app": 1}
     # The daily budget (40 places) goes into one run of 4 queries × 10.

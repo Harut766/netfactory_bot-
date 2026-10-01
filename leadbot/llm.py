@@ -59,6 +59,8 @@ SYSTEM_PROMPT = """\
 ФОРМАТ ОТВЕТА — строго JSON:
 {"fit": true|false, "has_web_app": true|false, "score": 1-10 (насколько горячий клиент),
  "summary": "исследование: чем занимается компания, для кого, как работают с клиентами — 2-3 предложения по-русски",
+ "web_presence": "что у компании есть онлайн: нет сайта / сайт-визитка / онлайн-запись через чужой сервис /
+   свой интернет-магазин или кабинет и т.п., и есть ли своё веб-приложение — 1 короткое предложение по-русски",
  "reason": "почему подходит/не подходит, 1 предложение по-русски",
  "idea": "что именно им автоматизировать в первую очередь, 1 предложение по-русски",
  "message": "текст DM на армянском"}
@@ -78,6 +80,7 @@ class Verdict:
     message: str
     summary: str = ""
     has_web_app: bool = False
+    web_presence: str = ""
 
 
 def parse_verdict(text: str) -> Verdict:
@@ -102,6 +105,7 @@ def parse_verdict(text: str) -> Verdict:
         message=str(data.get("message") or "").strip(),
         summary=str(data.get("summary") or "").strip(),
         has_web_app=bool(data.get("has_web_app")),
+        web_presence=str(data.get("web_presence") or "").strip(),
     )
     if verdict.fit and not verdict.message:
         raise LLMError("model accepted the lead but wrote no message")

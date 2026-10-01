@@ -79,6 +79,8 @@ def format_card(lead: dict) -> str:
     lines.append("")
     if lead.get("summary"):
         lines.append(f"🔍 <b>О компании:</b> {e(lead['summary'])}")
+    if c.get("web_presence"):
+        lines.append(f"💻 <b>Веб-приложение:</b> {e(c['web_presence'])}")
     lines += [
         f"🎯 <b>Оценка {lead['score']}/10.</b> {e(lead['reason'])}",
         f"🤖 <b>Что предложить:</b> {e(lead['idea'])}",

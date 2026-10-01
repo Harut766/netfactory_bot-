@@ -57,7 +57,9 @@ def format_card(lead: dict) -> str:
         lines.append(f"📍 {e(c['address'])}")
     ig = f"📸 <a href=\"https://instagram.com/{e(c['instagram'])}\">@{e(c['instagram'])}</a>"
     if c.get("ig_checked"):
-        ig += f" · {c['followers']} подписчиков · {c['posts']} постов · последний пост {_days_ago(c['last_post'])}"
+        ig += f" · {c['followers']} подписчиков · {c['posts']} постов"
+        if c.get("last_post"):
+            ig += f" · последний пост {_days_ago(c['last_post'])}"
         if c.get("first_post"):
             ig += f" · первый пост {e(c['first_post'])}"
     else:

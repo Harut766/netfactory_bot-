@@ -84,11 +84,25 @@ docker compose up -d --build
 Поиск занимает 5–20 минут: бот проверяет Instagram в «человеческом» темпе, чтобы его не блокировали.
 Если дневной лимит Apify уже потрачен, `/leads` ответит, что продолжит завтра.
 
-## Если Instagram блокирует проверку
-При частых запросах Instagram может временно перестать отдавать профили без логина. С домашнего IP это
-бывает редко. Бот тогда предупредит и продолжит присылать лиды с пометкой «активность не проверена».
-Блок обычно снимается через пару часов. Можно включить `APIFY_INSTAGRAM=true`: тогда профили будут
-читаться через Apify, но это расходует тот же бесплатный бюджет.
+## Instagram: Meta API (рекомендуется)
+Без логина Instagram часто не отдаёт данные профиля. Тогда бот читает публичную страницу профиля,
+а если закрыта и она, присылает лид с пометкой «активность не проверена». Надёжный способ —
+**Instagram Graph API (Business Discovery)**: официальный, бесплатный, видит бизнес- и автор-аккаунты.
+Личные аккаунты через него не видны, для них бот использует запасные способы.
+
+Что нужно:
+1. Ваш Instagram — профессиональный аккаунт (Business или Creator), привязанный к Facebook-странице.
+2. Приложение на https://developers.facebook.com (тип *Business*) с продуктом **Instagram Graph API**
+   (в новом интерфейсе — сценарий «Manage messaging & content on Instagram»).
+3. Токен: *Tools → Graph API Explorer* → выбрать своё приложение → разрешения `instagram_basic`,
+   `pages_show_list`, `pages_read_engagement`, `business_management` → *Generate Access Token*.
+   Обычный токен живёт ~1 час: продлите его до 60 дней в *Tools → Access Token Debugger → Extend Access Token*
+   (или создайте бессрочный токен системного пользователя в Meta Business Suite).
+4. ID вашего Instagram-аккаунта: в Graph API Explorer выполните
+   `me/accounts?fields=name,instagram_business_account` и возьмите `instagram_business_account.id`.
+5. Впишите в `.env` `META_ACCESS_TOKEN` и `META_IG_USER_ID`, перезапустите бота.
+
+Если токен истечёт, бот напишет «Meta API не отвечает» и продолжит работать запасными способами.
 
 ## Настройка под себя
 - Категории и города: `leadbot/queries.py`

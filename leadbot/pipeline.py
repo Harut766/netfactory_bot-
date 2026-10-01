@@ -74,9 +74,16 @@ async def find_leads(
     today: str,
 ) -> AsyncIterator[Lead]:
     """`today` is the local date: the Apify budget is counted per day."""
-    ig = instagram.InstagramClient(session, cfg.apify_token if cfg.apify_instagram else "")
+    ig = instagram.InstagramClient(session, cfg.apify_token if cfg.apify_instagram else "", cfg.meta_token,
+                                   cfg.meta_ig_id, cfg.meta_api_version)
     found = llm_errors = restarts = 0
-    warned_blocked = False
+    warned_blocked = warned_meta = False
+
+    async def warn_meta() -> None:
+        nonlocal warned_meta
+        if ig.meta_error and not warned_meta:
+            warned_meta = True
+            await notify(f"⚠️ Meta API не отвечает: {ig.meta_error}. Проверь META_ACCESS_TOKEN в .env.")
 
     used = await places.monthly_usage(session, cfg.apify_token)
     if used is not None and used >= cfg.apify_monthly_budget:
@@ -137,6 +144,7 @@ async def find_leads(
             try:
                 profile = await ig.profile(handle)
             except instagram.Blocked:
+                await warn_meta()
                 profile = None
                 if not warned_blocked:
                     warned_blocked = True
@@ -149,6 +157,7 @@ async def find_leads(
                 log.warning("instagram %s: %s", handle, e)
                 continue
             else:
+                await warn_meta()
                 if profile is None:
                     db.mark_place(place.id, "ig_not_found")
                     continue

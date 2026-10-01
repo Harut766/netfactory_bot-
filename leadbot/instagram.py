@@ -43,6 +43,20 @@ IG_HEADERS = {
     ),
     "Accept": "*/*",
 }
+PAGE_URL = "https://www.instagram.com/{}/"
+OG_RE = re.compile(r"<meta[^>]+property=[\"']og:(title|description)[\"'][^>]*content=[\"']([^\"']*)", re.I)
+COUNTS_RE = re.compile(
+    r"([\d.,]+\s*[KkMm]?)\s+Followers?,\s*[\d.,]+\s*[KkMm]?\s+Following,\s*([\d.,]+\s*[KkMm]?)\s+Posts?", re.I
+)
+BIO_RE = re.compile(r"on Instagram:\s*[\"“](.*)[\"”]\s*$", re.S)
+GRAPH_URL = "https://graph.facebook.com/{version}/{ig_id}"
+BUSINESS_FIELDS = (
+    "business_discovery.username({username})"
+    "{{username,name,biography,followers_count,media_count,media.limit(12){{timestamp,caption}}}}"
+)
+# Graph API errors that are about us, not the looked-up account: rate limits (4, 17, 32, 613, 80002),
+# an expired or invalid token (190), missing permissions (10, 200).
+META_STOP_CODES = {4, 17, 32, 613, 80002, 190, 10, 200}
 APIFY_URL = "https://api.apify.com/v2/acts/apify~instagram-profile-scraper/run-sync-get-dataset-items"
 MAX_PAGE = 2_000_000
 
@@ -191,34 +205,141 @@ def parse_apify_profile(item: dict) -> Profile | None:
     )
 
 
+def parse_business_discovery(data: dict) -> Profile | None:
+    bd = data.get("business_discovery")
+    if not bd:
+        return None
+    times, captions = [], []
+    for media in (bd.get("media") or {}).get("data", []):
+        if t := _ts(media.get("timestamp")):
+            times.append(t)
+        if media.get("caption"):
+            captions.append(media["caption"])
+    return Profile(
+        username=bd.get("username", ""),
+        full_name=bd.get("name") or "",
+        bio=bd.get("biography") or "",
+        followers=int(bd.get("followers_count") or 0),
+        posts=int(bd.get("media_count") or 0),
+        post_times=sorted(times, reverse=True),
+        captions=captions,
+    )
+
+
+def _count(text: str) -> int:
+    text = text.strip().replace(",", "").replace(" ", "")
+    mult = {"k": 1_000, "m": 1_000_000}.get(text[-1:].lower(), 1)
+    if mult > 1:
+        text = text[:-1]
+    try:
+        return int(float(text) * mult)
+    except ValueError:
+        return 0
+
+
+def parse_profile_page(username: str, page: str) -> Profile | None:
+    """The public profile page: counts and bio from its og: meta tags (no post dates there)."""
+    og = {k.lower(): html.unescape(v) for k, v in OG_RE.findall(page)}
+    m = COUNTS_RE.search(og.get("description", ""))
+    if not m:
+        return None
+    title = og.get("title", "")
+    bio = BIO_RE.search(og["description"])
+    return Profile(
+        username=username,
+        full_name=title.split(" (@")[0].strip() if " (@" in title else "",
+        bio=bio.group(1).strip() if bio else "",
+        followers=_count(m.group(1)),
+        posts=_count(m.group(2)),
+    )
+
+
 class InstagramClient:
     """Reads profiles directly from instagram.com; switches to Apify (if configured) once Instagram blocks us."""
 
-    def __init__(self, session: aiohttp.ClientSession, apify_token: str = ""):
+    def __init__(self, session: aiohttp.ClientSession, apify_token: str = "", meta_token: str = "",
+                 meta_ig_id: str = "", meta_version: str = "v23.0"):
         self.session = session
         self.apify_token = apify_token
+        self.meta = (meta_token, meta_ig_id, meta_version) if meta_token and meta_ig_id else None
+        self.meta_blocked = False
+        # Why Meta stopped working in this run, to tell the user once.
+        self.meta_error = ""
         self.blocked = False
+        self.page_blocked = False
         self._last_request = 0.0
 
     async def profile(self, username: str) -> Profile | None:
         """None if the account does not exist. Raises Blocked when no way to read it is left."""
+        if self.meta and not self.meta_blocked:
+            try:
+                if profile := await self._meta(username):
+                    return profile
+                # Personal accounts are invisible to Business Discovery: try the other ways.
+            except Blocked:
+                self.meta_blocked = True
         if not self.blocked:
             try:
                 return await self._direct(username)
             except Blocked:
                 self.blocked = True
-                log.warning("Instagram blocks direct requests")
+        if not self.page_blocked:
+            try:
+                return await self._page(username)
+            except Blocked:
+                self.page_blocked = True
+                log.warning("Instagram profile pages are blocked too")
         if self.apify_token:
             return await self._apify(username)
         raise Blocked
 
-    async def _direct(self, username: str) -> Profile | None:
+    async def _meta(self, username: str) -> Profile | None:
+        token, ig_id, version = self.meta
+        async with self.session.get(
+            GRAPH_URL.format(version=version, ig_id=ig_id),
+            params={"fields": BUSINESS_FIELDS.format(username=username), "access_token": token},
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as r:
+            data = await r.json(content_type=None)
+        if err := data.get("error"):
+            if err.get("code") in META_STOP_CODES:
+                log.warning("Meta API: %s", err.get("message"))
+                self.meta_error = err.get("message") or str(err.get("code"))
+                raise Blocked
+            # Not a business/creator account, or no such account.
+            return None
+        return parse_business_discovery(data)
+
+    async def _pause(self) -> None:
         # A human-like pace keeps the IP from being blocked.
         loop = asyncio.get_running_loop()
         wait = self._last_request + random.uniform(4, 9) - loop.time()
         if wait > 0:
             await asyncio.sleep(wait)
         self._last_request = loop.time()
+
+    async def _page(self, username: str) -> Profile | None:
+        await self._pause()
+        headers = {"User-Agent": IG_HEADERS["User-Agent"], "Accept-Language": "en-US,en;q=0.9"}
+        async with self.session.get(
+            PAGE_URL.format(username), headers=headers, timeout=aiohttp.ClientTimeout(total=30),
+            allow_redirects=False,
+        ) as r:
+            if r.status == 404:
+                return None
+            if r.status != 200:
+                log.warning("Instagram page for %s: HTTP %s", username, r.status)
+                raise Blocked
+            page = (await r.content.read(MAX_PAGE)).decode("utf-8", errors="replace")
+        profile = parse_profile_page(username, page)
+        if profile is None:
+            # A login wall instead of the profile.
+            log.warning("Instagram page for %s: no profile data", username)
+            raise Blocked
+        return profile
+
+    async def _direct(self, username: str) -> Profile | None:
+        await self._pause()
         async with self.session.get(
             PROFILE_URL, params={"username": username}, headers=IG_HEADERS,
             timeout=aiohttp.ClientTimeout(total=30), allow_redirects=False,
@@ -226,6 +347,7 @@ class InstagramClient:
             if r.status == 404:
                 return None
             if r.status in (401, 403, 429) or 300 <= r.status < 400:
+                log.warning("Instagram API for %s: HTTP %s", username, r.status)
                 raise Blocked
             if r.status != 200:
                 raise RuntimeError(f"Instagram {r.status}")
@@ -233,6 +355,7 @@ class InstagramClient:
                 data = await r.json(content_type=None)
             except ValueError:
                 # A login page instead of JSON.
+                log.warning("Instagram API for %s: not JSON", username)
                 raise Blocked from None
         return parse_web_profile(data)
 

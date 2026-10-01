@@ -25,6 +25,10 @@ class Config:
     apify_monthly_budget: float
     # Read Instagram profiles through Apify when Instagram blocks us. Costs extra, so off by default.
     apify_instagram: bool
+    # Instagram Graph API (Business Discovery): a long-lived token and the id of your Instagram business account.
+    meta_token: str
+    meta_ig_id: str
+    meta_api_version: str
     daily_leads: int
     # "HH:MM" in `timezone`; empty disables the daily run.
     daily_time: str
@@ -59,6 +63,9 @@ class Config:
             places_per_query=int(os.environ.get("APIFY_PLACES_PER_QUERY", "10")),
             apify_monthly_budget=float(os.environ.get("APIFY_MONTHLY_BUDGET", "4.5")),
             apify_instagram=os.environ.get("APIFY_INSTAGRAM", "").strip().lower() in ("1", "true", "yes"),
+            meta_token=os.environ.get("META_ACCESS_TOKEN", "").strip(),
+            meta_ig_id=os.environ.get("META_IG_USER_ID", "").strip(),
+            meta_api_version=os.environ.get("META_API_VERSION", "v23.0").strip(),
             daily_leads=int(os.environ.get("DAILY_LEADS", "30")),
             daily_time=os.environ.get("DAILY_TIME", "10:00").strip(),
             daily_weekdays=frozenset(_ids(os.environ.get("DAILY_WEEKDAYS", "1,2,3,4,5"))),

@@ -298,3 +298,75 @@ def test_refused_apify_start_does_not_spend_budget(monkeypatch):
         asyncio.run(collect())
     assert db.places_bought("2026-10-01") == 0
     assert db.next_queries(1) == ["q0"]
+
+
+def test_parse_profile_page():
+    page = ('<meta property="og:title" content="TUZ BARBERSHOP (@tuzbarbershop) &#x2022; Instagram photos and videos">'
+            '<meta property="og:description" content="12.5K Followers, 310 Following, 1,204 Posts - '
+            'TUZ BARBERSHOP (@tuzbarbershop) on Instagram: &quot;Barbershop in Yerevan&quot;">')
+    p = instagram.parse_profile_page("tuzbarbershop", page)
+    assert (p.full_name, p.followers, p.posts, p.bio) == ("TUZ BARBERSHOP", 12_500, 1204, "Barbershop in Yerevan")
+    assert p.last_post is None
+    page = ('<meta property="og:description" content="87 Followers, 5 Following, 9 Posts - '
+            'See Instagram photos and videos from Flowers (@flowers.am)">')
+    p = instagram.parse_profile_page("flowers.am", page)
+    assert (p.followers, p.posts, p.bio) == (87, 9, "")
+    assert instagram.parse_profile_page("x", "<html>Login • Instagram</html>") is None
+
+
+def test_parse_business_discovery():
+    p = instagram.parse_business_discovery({"business_discovery": {
+        "username": "shop", "name": "Shop", "biography": "bio", "followers_count": 900, "media_count": 40,
+        "media": {"data": [{"timestamp": "2026-09-28T10:00:00+0000", "caption": "new"},
+                           {"timestamp": "2026-09-01T10:00:00+0000"}]},
+    }, "id": "1"})
+    assert (p.full_name, p.followers, p.posts, p.captions) == ("Shop", 900, 40, ["new"])
+    assert p.last_post == datetime(2026, 9, 28, 10, tzinfo=timezone.utc)
+    assert instagram.parse_business_discovery({"id": "1"}) is None
+
+
+class _FakeResponse:
+    def __init__(self, data):
+        self.data = data
+
+    async def json(self, content_type=None):
+        return self.data
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeSession:
+    def __init__(self, data):
+        self.data = data
+
+    def get(self, url, **kwargs):
+        return _FakeResponse(self.data)
+
+
+def test_meta_client(monkeypatch):
+    import asyncio
+
+    ok = {"business_discovery": {"username": "shop", "followers_count": 5, "media_count": 1}}
+    client = instagram.InstagramClient(_FakeSession(ok), meta_token="t", meta_ig_id="1")
+    assert asyncio.run(client.profile("shop")).followers == 5
+
+    # A personal account is invisible to Business Discovery: the client falls back to the other ways.
+    async def page(self, username):
+        return instagram.Profile(username=username, followers=7)
+
+    monkeypatch.setattr(instagram.InstagramClient, "_page", page)
+    monkeypatch.setattr(instagram.InstagramClient, "_direct", lambda self, u: (_ for _ in ()).throw(instagram.Blocked))
+    personal = {"error": {"code": 110, "message": "Invalid user id"}}
+    client = instagram.InstagramClient(_FakeSession(personal), meta_token="t", meta_ig_id="1")
+    assert asyncio.run(client.profile("me")).followers == 7
+    assert not client.meta_blocked
+
+    # An expired token stops Meta for the run and is reported.
+    expired = {"error": {"code": 190, "message": "Session has expired"}}
+    client = instagram.InstagramClient(_FakeSession(expired), meta_token="t", meta_ig_id="1")
+    assert asyncio.run(client.profile("me")).followers == 7
+    assert client.meta_blocked and client.meta_error == "Session has expired"

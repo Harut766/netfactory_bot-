@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS leads (
     reason TEXT NOT NULL,
     idea TEXT NOT NULL,
     message TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
     -- new / sent / rejected
     status TEXT NOT NULL DEFAULT 'new',
     handled_by TEXT,
@@ -51,6 +52,9 @@ class DB:
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        columns = {r["name"] for r in self.conn.execute("PRAGMA table_info(leads)")}
+        if "summary" not in columns:
+            self.conn.execute("ALTER TABLE leads ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
 
     # ---------- search progress ----------
 
@@ -113,14 +117,14 @@ class DB:
     # ---------- leads ----------
 
     def add_lead(self, place_id: str, instagram: str, context: dict, score: int, reason: str, idea: str,
-                 message: str) -> int:
+                 message: str, summary: str = "") -> int:
         now = _now()
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO leads(place_id, instagram, context, score, reason, idea, message, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (place_id, instagram, json.dumps(context, ensure_ascii=False), score, reason, idea, message, now,
-                 now),
+                "INSERT INTO leads(place_id, instagram, context, score, reason, idea, message, summary, created_at,"
+                " updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (place_id, instagram, json.dumps(context, ensure_ascii=False), score, reason, idea, message, summary,
+                 now, now),
             )
             self.conn.execute(
                 "INSERT OR REPLACE INTO places(id, status, checked_at) VALUES (?, 'lead', ?)", (place_id, now)

@@ -26,18 +26,16 @@ class Lead:
 
 
 def reject_reason(profile: instagram.Profile, now: datetime, cfg: Config) -> str | None:
-    """Why an Instagram account does not look like a new and active business, or None if it does."""
-    if profile.is_private:
-        return "ig_private"
+    """Optional activity/age filters (0 in the config turns a filter off). None means the account passes."""
     last = profile.last_post
-    if last is None or (now - last).days > cfg.active_days:
+    if cfg.active_days and (last is None or (now - last).days > cfg.active_days):
         return "ig_inactive"
-    if profile.posts > cfg.max_posts:
+    if cfg.max_posts and profile.posts > cfg.max_posts:
         return "ig_old"
     return None
 
 
-def build_context(place: places.Place, handle: str, site: str, profile: instagram.Profile | None) -> dict:
+def build_context(place: places.Place, handle: str, site: dict, profile: instagram.Profile | None) -> dict:
     ctx = {
         "name": place.name,
         "category": place.category,
@@ -116,11 +114,11 @@ async def find_leads(
             if db.place_checked(place.id):
                 continue
 
-            if place.reviews > cfg.max_reviews:
+            if cfg.max_reviews and place.reviews > cfg.max_reviews:
                 db.mark_place(place.id, "old_reviews")
                 continue
             if place.instagram:
-                handle, site = instagram.extract_handle(place.instagram), ""
+                handle, site = instagram.extract_handle(place.instagram), {}
             else:
                 handle, site = await instagram.find_handle(session, place.website)
             if not handle:
@@ -163,10 +161,10 @@ async def find_leads(
                 continue
             llm_errors = 0
             if not verdict.fit or verdict.score < cfg.min_score:
-                db.mark_place(place.id, "not_fit")
+                db.mark_place(place.id, "has_web_app" if verdict.has_web_app else "not_fit")
                 continue
 
             lead_id = db.add_lead(place.id, handle, context, verdict.score, verdict.reason, verdict.idea,
-                                  verdict.message)
+                                  verdict.message, verdict.summary)
             found += 1
             yield Lead(lead_id)

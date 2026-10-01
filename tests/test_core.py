@@ -15,8 +15,10 @@ from leadbot.queries import all_queries  # noqa: E402
 NOW = datetime(2026, 10, 1, tzinfo=timezone.utc)
 
 
-def cfg() -> Config:
-    return Config.from_env()
+def cfg(**overrides) -> Config:
+    from dataclasses import replace
+
+    return replace(Config.from_env(), **overrides)
 
 
 # ---------- instagram ----------
@@ -79,12 +81,22 @@ def _profile(days_ago: int | None, posts=50, private=False) -> instagram.Profile
 
 
 def test_reject_reason():
-    c = cfg()
+    # Filters are off by default: every account passes.
+    assert pipeline.reject_reason(_profile(None, posts=10_000), NOW, cfg()) is None
+    c = cfg(active_days=30, max_posts=400)
     assert pipeline.reject_reason(_profile(5), NOW, c) is None
-    assert pipeline.reject_reason(_profile(c.active_days + 1), NOW, c) == "ig_inactive"
+    assert pipeline.reject_reason(_profile(31), NOW, c) == "ig_inactive"
     assert pipeline.reject_reason(_profile(None), NOW, c) == "ig_inactive"
-    assert pipeline.reject_reason(_profile(5, posts=c.max_posts + 1), NOW, c) == "ig_old"
-    assert pipeline.reject_reason(_profile(5, private=True), NOW, c) == "ig_private"
+    assert pipeline.reject_reason(_profile(5, posts=401), NOW, c) == "ig_old"
+
+
+def test_analyze_site():
+    page = ('<html><title>Shop</title><script>var login = 1</script><body>'
+            '<a href="https://apps.apple.com/x">App</a> Մուտք գործել <b>Add to cart</b></body></html>')
+    site = instagram.analyze_site(page)
+    assert site["web_app_signals"] == ["mobile_app", "login_or_account", "online_store"]
+    assert "var login" not in site["text"] and "Add to cart" in site["text"]
+    assert instagram.analyze_site("<title>Flowers</title><p>Call us on WhatsApp</p>")["web_app_signals"] == []
 
 
 def test_parse_place():
@@ -179,7 +191,7 @@ def _fake_place(i, reviews=10, site="", ig=""):
                         reviews=reviews, category="", maps_url="", instagram=ig)
 
 
-def _run_find_leads(monkeypatch, batch, want=5, usage=0.0):
+def _run_find_leads(monkeypatch, batch, want=5, usage=0.0, config=None):
     import asyncio
 
     calls = []
@@ -195,8 +207,10 @@ def _run_find_leads(monkeypatch, batch, want=5, usage=0.0):
         return _profile(90 if handle == "inactive" else 2)
 
     async def fake_evaluate(session, key, models, ctx, today):
-        fit = ctx["instagram"] != "notfit"
-        return llm.Verdict(fit=fit, score=8 if fit else 2, reason="r", idea="i", message="Բարև" if fit else "")
+        has_app = ctx["instagram"] == "hasapp"
+        fit = ctx["instagram"] not in ("notfit", "hasapp")
+        return llm.Verdict(fit=fit, score=8 if fit else 2, reason="r", idea="i", message="Բարև" if fit else "",
+                           summary="s", has_web_app=has_app)
 
     monkeypatch.setattr(places, "search", fake_search)
     monkeypatch.setattr(places, "monthly_usage", fake_usage)
@@ -211,7 +225,7 @@ def _run_find_leads(monkeypatch, batch, want=5, usage=0.0):
         notes.append(text)
 
     async def collect():
-        return [lead async for lead in pipeline.find_leads(cfg(), db, None, want, lambda: False, notify,
+        return [lead async for lead in pipeline.find_leads(config or cfg(), db, None, want, lambda: False, notify,
                                                            "2026-10-01")]
 
     leads = asyncio.run(collect())
@@ -220,21 +234,38 @@ def _run_find_leads(monkeypatch, batch, want=5, usage=0.0):
 
 def test_find_leads(monkeypatch):
     batch = [
-        _fake_place(1, reviews=999, site="https://instagram.com/old"),  # too many reviews
-        _fake_place(2),  # no website, no instagram
+        _fake_place(1, reviews=999, site="https://instagram.com/old"),
+        _fake_place(2),  # no website, no instagram: nobody to message
         _fake_place(3, site="https://instagram.com/inactive"),
         _fake_place(4, ig="https://www.instagram.com/good/"),
         _fake_place(5, site="https://instagram.com/notfit"),
         _fake_place(6, site="https://instagram.com/good"),  # same account as p4
+        _fake_place(7, site="https://instagram.com/hasapp"),
     ]
     db, leads, calls, notes = _run_find_leads(monkeypatch, batch)
-    assert [db.lead(lead.id)["instagram"] for lead in leads] == ["good"]
+    # Without filters, only the businesses with their own web app (and non-businesses) are dropped.
+    assert [db.lead(lead.id)["instagram"] for lead in leads] == ["old", "inactive", "good"]
+    assert db.lead(leads[0].id)["summary"] == "s"
     s = db.stats("2000-01-01")["places"]
-    assert s == {"old_reviews": 1, "no_instagram": 1, "ig_inactive": 1, "lead": 1, "not_fit": 1, "duplicate": 1}
-    # The daily budget (35 places) is spent in two runs: 3 queries × 10, then 1 query × 5.
-    assert calls == [(["q0", "q1", "q2"], 10), (["q3"], 5)]
-    assert db.places_bought("2026-10-01") == 35
+    assert s == {"lead": 3, "no_instagram": 1, "not_fit": 1, "duplicate": 1, "has_web_app": 1}
+    # The daily budget (40 places) goes into one run of 4 queries × 10.
+    assert calls == [(["q0", "q1", "q2", "q3"], 10)]
+    assert db.places_bought("2026-10-01") == 40
     assert any("Дневной лимит" in n for n in notes)
+
+
+def test_find_leads_with_filters(monkeypatch):
+    batch = [
+        _fake_place(1, reviews=999, site="https://instagram.com/old"),
+        _fake_place(3, site="https://instagram.com/inactive"),
+        _fake_place(4, ig="https://www.instagram.com/good/"),
+    ]
+    config = cfg(active_days=30, max_reviews=200, places_per_day=35)
+    db, leads, calls, notes = _run_find_leads(monkeypatch, batch, config=config)
+    assert [db.lead(lead.id)["instagram"] for lead in leads] == ["good"]
+    assert db.stats("2000-01-01")["places"] == {"old_reviews": 1, "ig_inactive": 1, "lead": 1}
+    # 35 places: 3 queries × 10, then 1 query × 5.
+    assert calls == [(["q0", "q1", "q2"], 10), (["q3"], 5)]
 
 
 def test_find_leads_stops_when_month_budget_spent(monkeypatch):

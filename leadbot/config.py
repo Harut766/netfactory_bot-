@@ -31,12 +31,12 @@ class Config:
     # ISO weekdays (1 = Monday) when the daily run happens.
     daily_weekdays: frozenset[int]
     timezone: str
-    # Lead filters: an account must have posted within `active_days` days, have at most `max_posts` posts,
-    # and the business at most `max_reviews` Google reviews (many reviews = long-established business).
+    # Optional lead filters, 0 = off: an account must have posted within `active_days` days, have at most
+    # `max_posts` posts, and the business at most `max_reviews` Google reviews.
     active_days: int
     max_posts: int
     max_reviews: int
-    # Minimal fit score (1-10) from the model.
+    # Minimal fit score (1-10) from the model; 0 keeps every business the model accepts.
     min_score: int
     db_path: Path
 
@@ -55,17 +55,17 @@ class Config:
                 if m.strip()
             ),
             apify_token=os.environ.get("APIFY_TOKEN", ""),
-            places_per_day=int(os.environ.get("APIFY_PLACES_PER_DAY", "35")),
+            places_per_day=int(os.environ.get("APIFY_PLACES_PER_DAY", "40")),
             places_per_query=int(os.environ.get("APIFY_PLACES_PER_QUERY", "10")),
             apify_monthly_budget=float(os.environ.get("APIFY_MONTHLY_BUDGET", "4.5")),
             apify_instagram=os.environ.get("APIFY_INSTAGRAM", "").strip().lower() in ("1", "true", "yes"),
-            daily_leads=int(os.environ.get("DAILY_LEADS", "10")),
+            daily_leads=int(os.environ.get("DAILY_LEADS", "30")),
             daily_time=os.environ.get("DAILY_TIME", "10:00").strip(),
             daily_weekdays=frozenset(_ids(os.environ.get("DAILY_WEEKDAYS", "1,2,3,4,5"))),
             timezone=os.environ.get("TIMEZONE", "Asia/Yerevan"),
-            active_days=int(os.environ.get("ACTIVE_DAYS", "30")),
-            max_posts=int(os.environ.get("MAX_POSTS", "400")),
-            max_reviews=int(os.environ.get("MAX_REVIEWS", "200")),
-            min_score=int(os.environ.get("MIN_SCORE", "6")),
+            active_days=int(os.environ.get("ACTIVE_DAYS", "0")),
+            max_posts=int(os.environ.get("MAX_POSTS", "0")),
+            max_reviews=int(os.environ.get("MAX_REVIEWS", "0")),
+            min_score=int(os.environ.get("MIN_SCORE", "0")),
             db_path=Path(os.environ.get("DB_PATH", "/data/leads.sqlite3")),
         )

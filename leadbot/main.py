@@ -28,12 +28,12 @@ cancel_requested = False
 
 PLACE_STATUSES = {
     "lead": "лиды",
-    "not_fit": "не подошли по оценке ИИ",
+    "has_web_app": "уже есть своё веб-приложение",
+    "not_fit": "не бизнес или не в Армении",
     "no_instagram": "без Instagram",
     "ig_inactive": "неактивный Instagram",
     "ig_old": "давно существуют (много постов)",
     "old_reviews": "давно существуют (много отзывов)",
-    "ig_private": "закрытый Instagram",
     "ig_not_found": "Instagram не найден",
     "duplicate": "дубли",
 }
@@ -74,8 +74,10 @@ def format_card(lead: dict) -> str:
         lines.append(" · ".join(extra))
     if c.get("maps_url"):
         lines.append(f"🗺 <a href=\"{e(c['maps_url'])}\">Google Maps</a>")
+    lines.append("")
+    if lead.get("summary"):
+        lines.append(f"🔍 <b>О компании:</b> {e(lead['summary'])}")
     lines += [
-        "",
         f"🎯 <b>Оценка {lead['score']}/10.</b> {e(lead['reason'])}",
         f"🤖 <b>Что предложить:</b> {e(lead['idea'])}",
         "",
@@ -193,7 +195,8 @@ async def no_access(message: Message) -> None:
 async def start(message: Message) -> None:
     schedule = f"по расписанию в {cfg.daily_time}" if cfg.daily_time else "по команде"
     await message.answer(
-        "Я ищу новые активные армянские бизнесы и готовлю для них сообщение в Instagram от NetFactory.\n\n"
+        "Я нахожу армянские бизнесы без своего веб-приложения, изучаю каждый и готовлю для него "
+        "сообщение в Instagram от NetFactory.\n\n"
         f"Лиды приходят {schedule} (до {cfg.daily_leads} шт., в пределах бесплатного лимита Apify).\n"
         "Под каждым лидом: ✅ Отправил · 🔄 Другой текст · ❌ Не подходит.\n\n"
         "/leads — найти лиды сейчас (/leads 5 — пять штук)\n"

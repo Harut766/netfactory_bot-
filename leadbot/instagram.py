@@ -22,6 +22,17 @@ TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
 DESCRIPTION_RE = re.compile(
     r"<meta[^>]+(?:name|property)=[\"'](?:og:)?description[\"'][^>]*content=[\"']([^\"']*)", re.I
 )
+SCRIPT_RE = re.compile(r"<(script|style|noscript|svg)\b.*?</\1>", re.I | re.S)
+TAG_RE = re.compile(r"<[^>]+>")
+WEB_APP_SIGNALS = [
+    ("mobile_app", re.compile(r"apps\.apple\.com|play\.google\.com/store/apps", re.I)),
+    ("login_or_account", re.compile(
+        r"log ?in\b|sign ?in\b|my account|личный кабинет|войти|մուտք գործել|անձնական (էջ|գրասենյակ)", re.I)),
+    ("online_store", re.compile(r"add to cart|checkout|/cart\b|корзин|в корзину|զամբյուղ", re.I)),
+    ("online_booking", re.compile(
+        r"book now|online booking|онлайн[- ]запись|записаться онлайн|առցանց ամրագր|"
+        r"calendly\.com|booksy\.com|fresha\.com|altegio|yclients", re.I)),
+]
 PROFILE_URL = "https://i.instagram.com/api/v1/users/web_profile_info/"
 # The public app id of instagram.com; the endpoint refuses requests without it.
 IG_HEADERS = {
@@ -83,12 +94,26 @@ def site_summary(page: str) -> str:
     return text[:400]
 
 
-async def find_handle(session: aiohttp.ClientSession, website: str) -> tuple[str | None, str]:
-    """Instagram handle and a short description of the site (title and meta description)."""
+def visible_text(page: str, limit: int = 1500) -> str:
+    page = SCRIPT_RE.sub(" ", page)
+    return " ".join(html.unescape(TAG_RE.sub(" ", page)).split())[:limit]
+
+
+def web_app_signals(page: str) -> list[str]:
+    """Hints that the business already runs its own web or mobile application."""
+    return [name for name, pattern in WEB_APP_SIGNALS if pattern.search(page)]
+
+
+def analyze_site(page: str) -> dict:
+    return {"about": site_summary(page), "text": visible_text(page), "web_app_signals": web_app_signals(page)}
+
+
+async def find_handle(session: aiohttp.ClientSession, website: str) -> tuple[str | None, dict]:
+    """Instagram handle and what the site says about the business (see analyze_site); {} without a site."""
     if not website:
-        return None, ""
+        return None, {}
     if "instagram.com" in website.lower():
-        return extract_handle(website), ""
+        return extract_handle(website), {}
     try:
         async with session.get(
             website,
@@ -98,13 +123,13 @@ async def find_handle(session: aiohttp.ClientSession, website: str) -> tuple[str
             ssl=False,
         ) as r:
             if r.status >= 400:
-                return None, ""
+                return None, {}
             raw = await r.content.read(MAX_PAGE)
     except (aiohttp.ClientError, asyncio.TimeoutError, UnicodeError, ValueError) as e:
         log.info("site %s: %s", website, e)
-        return None, ""
+        return None, {}
     page = raw.decode("utf-8", errors="replace")
-    return extract_handle(page), site_summary(page)
+    return extract_handle(page), analyze_site(page)
 
 
 def _ts(value) -> datetime | None:

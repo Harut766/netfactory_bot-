@@ -1,6 +1,7 @@
 import asyncio
 import html
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -27,15 +28,17 @@ tasks: set[asyncio.Task] = set()
 cancel_requested = False
 
 PLACE_STATUSES = {
-    "lead": "лиды",
-    "has_web_app": "уже есть своё веб-приложение",
-    "not_fit": "не бизнес или не в Армении",
-    "no_instagram": "без Instagram",
+    "lead": "карточки отправлены",
+    "duplicate": "дубли (тот же Instagram, например другой филиал)",
+    "low_score": "ниже MIN_SCORE",
     "ig_inactive": "неактивный Instagram",
     "ig_old": "давно существуют (много постов)",
     "old_reviews": "давно существуют (много отзывов)",
-    "ig_not_found": "Instagram не найден",
-    "duplicate": "дубли",
+    # Statuses of older versions, which dropped these instead of sending a card.
+    "has_web_app": "уже есть веб-приложение (старая версия)",
+    "not_fit": "не подошли (старая версия)",
+    "no_instagram": "без Instagram (старая версия)",
+    "ig_not_found": "Instagram не найден (старая версия)",
 }
 
 
@@ -52,19 +55,25 @@ def _days_ago(iso_date: str | None) -> str:
 
 def format_card(lead: dict) -> str:
     c, e = lead["context"], html.escape
-    lines = [f"🏢 <b>{e(c['name'])}</b>" + (f" · {e(c['category'])}" if c.get("category") else "")]
+    lines = []
+    if c.get("has_web_app"):
+        lines.append("⚠️ <b>У компании уже есть своё веб-приложение</b>")
+    elif c.get("fit") is False:
+        lines.append("⚠️ <b>Скорее не подходит</b> — см. оценку")
+    lines.append(f"🏢 <b>{e(c['name'])}</b>" + (f" · {e(c['category'])}" if c.get("category") else ""))
     if c.get("address"):
         lines.append(f"📍 {e(c['address'])}")
-    ig = f"📸 <a href=\"https://instagram.com/{e(c['instagram'])}\">@{e(c['instagram'])}</a>"
-    if c.get("ig_checked"):
-        ig += f" · {c['followers']} подписчиков · {c['posts']} постов"
-        if c.get("last_post"):
-            ig += f" · последний пост {_days_ago(c['last_post'])}"
-        if c.get("first_post"):
-            ig += f" · первый пост {e(c['first_post'])}"
+    if c.get("instagram"):
+        ig = f"📸 <a href=\"https://instagram.com/{e(c['instagram'])}\">@{e(c['instagram'])}</a>"
+        if c.get("ig_checked"):
+            ig += f" · {c['followers']} подписчиков · {c['posts']} постов"
+            if c.get("last_post"):
+                ig += f" · последний пост {_days_ago(c['last_post'])}"
+            if c.get("first_post"):
+                ig += f" · первый пост {e(c['first_post'])}"
+        lines.append(ig)
     else:
-        ig += " · ⚠️ активность не проверена"
-    lines.append(ig)
+        lines.append("📸 Instagram не найден — пишите в WhatsApp или звоните")
     extra = []
     if c.get("website") and "instagram.com" not in c["website"]:
         extra.append(f"🌐 {e(c['website'])}")
@@ -95,8 +104,23 @@ def format_card(lead: dict) -> str:
     return "\n".join(lines)
 
 
+def whatsapp_url(phone: str) -> str | None:
+    digits = re.sub(r"\D", "", phone or "")
+    if len(digits) == 8:
+        # A local Armenian number without the country code.
+        digits = "374" + digits
+    elif len(digits) == 9 and digits.startswith("0"):
+        digits = "374" + digits[1:]
+    return f"https://wa.me/{digits}" if len(digits) >= 11 else None
+
+
 def card_keyboard(lead: dict) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text="✉️ Открыть Direct", url=f"https://ig.me/m/{lead['instagram']}")]]
+    contact = []
+    if lead["instagram"]:
+        contact.append(InlineKeyboardButton(text="✉️ Открыть Direct", url=f"https://ig.me/m/{lead['instagram']}"))
+    if wa := whatsapp_url(lead["context"].get("phone", "")):
+        contact.append(InlineKeyboardButton(text="💬 WhatsApp", url=wa))
+    rows = [contact] if contact else []
     if lead["status"] == "new":
         rows.append([
             InlineKeyboardButton(text="✅ Отправил", callback_data=f"sent:{lead['id']}"),
@@ -199,8 +223,8 @@ async def no_access(message: Message) -> None:
 async def start(message: Message) -> None:
     schedule = f"по расписанию в {cfg.daily_time}" if cfg.daily_time else "по команде"
     await message.answer(
-        "Я нахожу армянские бизнесы без своего веб-приложения, изучаю каждый и готовлю для него "
-        "сообщение в Instagram от NetFactory.\n\n"
+        "Я нахожу армянские бизнесы, изучаю каждый, ставлю оценку и готовлю сообщение от NetFactory "
+        "для Instagram или WhatsApp. Карточку получает каждая найденная компания.\n\n"
         f"Лиды приходят {schedule} (до {cfg.daily_leads} шт., в пределах бесплатного лимита Apify).\n"
         "Под каждым лидом: ✅ Отправил · 🔄 Другой текст · ❌ Не подходит.\n\n"
         "/leads — найти лиды сейчас (/leads 5 — пять штук)\n"
@@ -253,7 +277,7 @@ async def stats(message: Message) -> None:
         apify,
         f"<b>Всего лидов:</b> {sum(leads.values())} — отправлено {leads.get('sent', 0)}, "
         f"ждут {leads.get('new', 0)}, отклонено {leads.get('rejected', 0)}",
-        f"<b>Проверено компаний:</b> {sum(s['places'].values())}",
+        f"<b>Проверено компаний:</b> {sum(s['places'].values())}, ждут обработки: {db.pending_count()}",
     ]
     for key, count in sorted(s["places"].items(), key=lambda kv: -kv[1]):
         lines.append(f"  • {PLACE_STATUSES.get(key, key)}: {count}")

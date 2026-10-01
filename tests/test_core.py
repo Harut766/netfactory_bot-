@@ -113,9 +113,9 @@ def test_parse_place():
 def test_parse_verdict():
     v = llm.parse_verdict('```json\n{"fit": true, "score": "8", "reason": "r", "idea": "i", "message": "Բարև"}\n```')
     assert (v.fit, v.score, v.message) == (True, 8, "Բարև")
-    assert llm.parse_verdict('{"fit": false, "score": 2}').fit is False
+    assert llm.parse_verdict('{"fit": false, "score": 2, "message": "Բարև"}').fit is False
     with pytest.raises(llm.LLMError):
-        llm.parse_verdict('{"fit": true, "score": 9, "message": ""}')
+        llm.parse_verdict('{"fit": false, "score": 2}')
     with pytest.raises(llm.LLMError):
         llm.parse_verdict("not json")
 
@@ -181,9 +181,23 @@ def test_format_card_escapes():
     assert "Веб-приложение:</b> только Instagram" in text
     assert "A&amp;B" in text and "Բարև &lt;Ձեզ&gt;" in text and "a &lt; b" in text
     assert len(card_keyboard(lead).inline_keyboard) == 2
+    lead["instagram"] = None
+    lead["context"] |= {"instagram": None, "phone": "+374 94 083011", "has_web_app": True}
+    text = format_card(lead)
+    assert "Instagram не найден" in text and "уже есть своё веб-приложение" in text
+    assert [b.text for b in card_keyboard(lead).inline_keyboard[0]] == ["💬 WhatsApp"]
+    assert card_keyboard(lead).inline_keyboard[0][0].url == "https://wa.me/37494083011"
     lead["status"], lead["handled_by"] = "sent", "@me"
     assert "Отправлено — @me" in format_card(lead)
     assert len(card_keyboard(lead).inline_keyboard) == 1
+
+
+def test_whatsapp_url():
+    from leadbot.main import whatsapp_url
+
+    assert whatsapp_url("094 083011") == "https://wa.me/37494083011"
+    assert whatsapp_url("+374 10 123456") == "https://wa.me/37410123456"
+    assert whatsapp_url("") is None and whatsapp_url("123") is None
 
 
 # ---------- pipeline (network replaced with fakes) ----------
@@ -196,11 +210,14 @@ def _fake_place(i, reviews=10, site="", ig=""):
 def _run_find_leads(monkeypatch, batch, want=5, usage=0.0, config=None):
     import asyncio
 
-    calls = []
+    calls, seen = [], []
 
     async def fake_search(session, token, queries, per_query, max_charge_usd):
         calls.append((list(queries), per_query))
         return batch if len(calls) == 1 else []
+
+    async def fake_find_handle(session, website):
+        return instagram.extract_handle(website or ""), {}
 
     async def fake_usage(session, token):
         return usage
@@ -211,13 +228,15 @@ def _run_find_leads(monkeypatch, batch, want=5, usage=0.0, config=None):
     async def fake_evaluate(session, key, models, ctx, today):
         has_app = ctx["instagram"] == "hasapp"
         fit = ctx["instagram"] not in ("notfit", "hasapp")
-        return llm.Verdict(fit=fit, score=8 if fit else 2, reason="r", idea="i", message="Բարև" if fit else "",
+        seen.append(ctx["name"])
+        return llm.Verdict(fit=fit, score=8 if fit else 2, reason="r", idea="i", message="Բարև",
                            summary="s", has_web_app=has_app, web_presence="w")
 
     monkeypatch.setattr(places, "search", fake_search)
     monkeypatch.setattr(places, "monthly_usage", fake_usage)
     monkeypatch.setattr(instagram.InstagramClient, "profile", fake_profile)
     monkeypatch.setattr(llm, "evaluate", fake_evaluate)
+    monkeypatch.setattr(instagram, "find_handle", fake_find_handle)
 
     db = DB(":memory:")
     db.sync_queries([f"q{i}" for i in range(10)])
@@ -231,30 +250,41 @@ def _run_find_leads(monkeypatch, batch, want=5, usage=0.0, config=None):
                                                            "2026-10-01")]
 
     leads = asyncio.run(collect())
-    return db, leads, calls, notes
+    return db, leads, calls, notes, seen
 
 
 def test_find_leads(monkeypatch):
     batch = [
         _fake_place(1, reviews=999, site="https://instagram.com/old"),
-        _fake_place(2),  # no website, no instagram: nobody to message
+        _fake_place(2),  # no website, no instagram: card for WhatsApp / phone
         _fake_place(3, site="https://instagram.com/inactive"),
         _fake_place(4, ig="https://www.instagram.com/good/"),
         _fake_place(5, site="https://instagram.com/notfit"),
         _fake_place(6, site="https://instagram.com/good"),  # same account as p4
         _fake_place(7, site="https://instagram.com/hasapp"),
     ]
-    db, leads, calls, notes = _run_find_leads(monkeypatch, batch)
-    # Without filters, only the businesses with their own web app (and non-businesses) are dropped.
-    assert [db.lead(lead.id)["instagram"] for lead in leads] == ["old", "inactive", "good"]
-    assert db.lead(leads[0].id)["summary"] == "s"
-    assert db.lead(leads[0].id)["context"]["web_presence"] == "w"
-    s = db.stats("2000-01-01")["places"]
-    assert s == {"lead": 3, "no_instagram": 1, "not_fit": 1, "duplicate": 1, "has_web_app": 1}
+    db, leads, calls, notes, seen = _run_find_leads(monkeypatch, batch, want=40)
+    # Every bought place gets a card, except a second branch of the same account.
+    cards = [db.lead(lead.id) for lead in leads]
+    assert [c["instagram"] for c in cards] == ["old", None, "inactive", "good", "notfit", "hasapp"]
+    assert cards[-1]["context"]["has_web_app"] is True and cards[-2]["context"]["fit"] is False
+    assert cards[0]["summary"] == "s" and cards[0]["context"]["web_presence"] == "w"
+    assert db.stats("2000-01-01")["places"] == {"lead": 6, "duplicate": 1}
     # The daily budget (40 places) goes into one run of 4 queries × 10.
     assert calls == [(["q0", "q1", "q2", "q3"], 10)]
     assert db.places_bought("2026-10-01") == 40
     assert any("Дневной лимит" in n for n in notes)
+
+
+def test_find_leads_keeps_unprocessed_places(monkeypatch):
+    batch = [_fake_place(i, ig=f"https://instagram.com/shop{i}") for i in range(5)]
+    db, leads, calls, notes, seen = _run_find_leads(monkeypatch, batch, want=2)
+    # Only as many places as needed are bought...
+    assert calls == [(["q0"], 10)]
+    assert len(leads) == 2
+    # ...and the rest wait for the next run instead of being thrown away.
+    assert db.pending_count() == 3
+    assert db.pop_pending()["id"] == "p2"
 
 
 def test_find_leads_with_filters(monkeypatch):
@@ -264,7 +294,7 @@ def test_find_leads_with_filters(monkeypatch):
         _fake_place(4, ig="https://www.instagram.com/good/"),
     ]
     config = cfg(active_days=30, max_reviews=200, places_per_day=35)
-    db, leads, calls, notes = _run_find_leads(monkeypatch, batch, config=config)
+    db, leads, calls, notes, seen = _run_find_leads(monkeypatch, batch, want=40, config=config)
     assert [db.lead(lead.id)["instagram"] for lead in leads] == ["good"]
     assert db.stats("2000-01-01")["places"] == {"old_reviews": 1, "ig_inactive": 1, "lead": 1}
     # 35 places: 3 queries × 10, then 1 query × 5.
@@ -272,7 +302,7 @@ def test_find_leads_with_filters(monkeypatch):
 
 
 def test_find_leads_stops_when_month_budget_spent(monkeypatch):
-    db, leads, calls, notes = _run_find_leads(monkeypatch, [], usage=4.9)
+    db, leads, calls, notes, seen = _run_find_leads(monkeypatch, [], usage=4.9)
     assert leads == [] and calls == []
     assert any("лимит Apify на этот месяц" in n for n in notes)
 
@@ -373,3 +403,25 @@ def test_meta_client(monkeypatch):
     client = instagram.InstagramClient(_FakeSession(expired), meta_token="t", meta_ig_id="1")
     assert asyncio.run(client.profile("me")).followers == 7
     assert client.meta_blocked and client.meta_error == "Session has expired"
+
+
+def test_migrates_old_leads_table(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE leads (id INTEGER PRIMARY KEY AUTOINCREMENT, place_id TEXT NOT NULL UNIQUE,
+            instagram TEXT NOT NULL UNIQUE, context TEXT NOT NULL, score INTEGER NOT NULL, reason TEXT NOT NULL,
+            idea TEXT NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'new', handled_by TEXT,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        INSERT INTO leads(place_id, instagram, context, score, reason, idea, message, created_at, updated_at)
+            VALUES ('p1', 'shop', '{}', 8, 'r', 'i', 'm', 't', 't');
+    """)
+    conn.commit()
+    conn.close()
+    db = DB(path)
+    assert db.lead(1)["instagram"] == "shop" and db.lead(1)["summary"] == ""
+    db.add_lead("p2", None, {}, 5, "r", "i", "m")
+    db.add_lead("p3", None, {}, 5, "r", "i", "m")
+    assert db.lead(3)["instagram"] is None

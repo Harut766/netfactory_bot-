@@ -66,7 +66,7 @@ class Config:
             meta_token=os.environ.get("META_ACCESS_TOKEN", "").strip(),
             meta_ig_id=os.environ.get("META_IG_USER_ID", "").strip(),
             meta_api_version=os.environ.get("META_API_VERSION", "v23.0").strip(),
-            daily_leads=int(os.environ.get("DAILY_LEADS", "30")),
+            daily_leads=int(os.environ.get("DAILY_LEADS", "40")),
             daily_time=os.environ.get("DAILY_TIME", "10:00").strip(),
             daily_weekdays=frozenset(_ids(os.environ.get("DAILY_WEEKDAYS", "1,2,3,4,5"))),
             timezone=os.environ.get("TIMEZONE", "Asia/Yerevan"),

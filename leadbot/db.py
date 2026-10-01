@@ -22,10 +22,17 @@ CREATE TABLE IF NOT EXISTS usage (
     day TEXT PRIMARY KEY,
     places INTEGER NOT NULL
 );
+-- Places bought on Apify but not processed yet: nothing paid for is thrown away.
+CREATE TABLE IF NOT EXISTS pending (
+    position INTEGER PRIMARY KEY AUTOINCREMENT,
+    place_id TEXT NOT NULL UNIQUE,
+    data TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS leads (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     place_id TEXT NOT NULL UNIQUE,
-    instagram TEXT NOT NULL UNIQUE,
+    -- NULL when the business has no Instagram (contact by phone / WhatsApp).
+    instagram TEXT UNIQUE,
     context TEXT NOT NULL,
     score INTEGER NOT NULL,
     reason TEXT NOT NULL,
@@ -52,9 +59,20 @@ class DB:
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
-        columns = {r["name"] for r in self.conn.execute("PRAGMA table_info(leads)")}
+        self._migrate()
+
+    def _migrate(self) -> None:
+        columns = {r["name"]: r for r in self.conn.execute("PRAGMA table_info(leads)")}
         if "summary" not in columns:
             self.conn.execute("ALTER TABLE leads ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
+        if columns["instagram"]["notnull"]:
+            # Leads without Instagram are allowed now; SQLite can only drop NOT NULL by rebuilding the table.
+            with self.conn:
+                self.conn.execute("ALTER TABLE leads RENAME TO leads_old")
+                self.conn.executescript(SCHEMA)
+                cols = ", ".join(r["name"] for r in self.conn.execute("PRAGMA table_info(leads_old)"))
+                self.conn.execute(f"INSERT INTO leads({cols}) SELECT {cols} FROM leads_old")
+                self.conn.execute("DROP TABLE leads_old")
 
     # ---------- search progress ----------
 
@@ -99,6 +117,26 @@ class DB:
                 (day, n, n),
             )
 
+    # ---------- bought, not yet processed ----------
+
+    def add_pending(self, items: list[tuple[str, dict]]) -> None:
+        with self.conn:
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO pending(place_id, data) VALUES (?, ?)",
+                [(pid, json.dumps(data, ensure_ascii=False)) for pid, data in items],
+            )
+
+    def pop_pending(self) -> dict | None:
+        row = self.conn.execute("SELECT position, data FROM pending ORDER BY position LIMIT 1").fetchone()
+        if not row:
+            return None
+        with self.conn:
+            self.conn.execute("DELETE FROM pending WHERE position = ?", (row["position"],))
+        return json.loads(row["data"])
+
+    def pending_count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM pending").fetchone()[0]
+
     # ---------- places ----------
 
     def place_checked(self, place_id: str) -> bool:
@@ -111,12 +149,14 @@ class DB:
                 (place_id, status, _now()),
             )
 
-    def instagram_taken(self, handle: str) -> bool:
+    def instagram_taken(self, handle: str | None) -> bool:
+        if not handle:
+            return False
         return self.conn.execute("SELECT 1 FROM leads WHERE instagram = ?", (handle,)).fetchone() is not None
 
     # ---------- leads ----------
 
-    def add_lead(self, place_id: str, instagram: str, context: dict, score: int, reason: str, idea: str,
+    def add_lead(self, place_id: str, instagram: str | None, context: dict, score: int, reason: str, idea: str,
                  message: str, summary: str = "") -> int:
         now = _now()
         with self.conn:

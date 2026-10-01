@@ -64,7 +64,8 @@ SYSTEM_PROMPT = """\
  "reason": "почему подходит/не подходит, 1 предложение по-русски",
  "idea": "что именно им автоматизировать в первую очередь, 1 предложение по-русски",
  "message": "текст DM на армянском"}
-Если fit=false, message можно оставить пустым."""
+message пиши ВСЕГДА, даже если fit=false: команда сама решит, писать ли. Если instagram = null, сообщение
+отправят в WhatsApp — текст тот же."""
 
 
 class LLMError(Exception):
@@ -107,8 +108,8 @@ def parse_verdict(text: str) -> Verdict:
         has_web_app=bool(data.get("has_web_app")),
         web_presence=str(data.get("web_presence") or "").strip(),
     )
-    if verdict.fit and not verdict.message:
-        raise LLMError("model accepted the lead but wrote no message")
+    if not verdict.message:
+        raise LLMError("model wrote no message")
     return verdict
 
 
@@ -168,11 +169,8 @@ async def rewrite(session: aiohttp.ClientSession, api_key: str, models: tuple[st
                   today: str, previous: str) -> Verdict:
     prompt = (
         _prompt(context, today)
-        + "\n\nБизнес уже признан подходящим (fit=true). Предыдущий вариант сообщения не понравился:\n"
+        + "\n\nПредыдущий вариант сообщения не понравился:\n"
         + previous
         + "\n\nНапиши заметно другой вариант: другой заход и другая идея автоматизации."
     )
-    verdict = parse_verdict(await _generate(session, api_key, models, prompt, temperature=1.0))
-    if not verdict.message:
-        raise LLMError("model wrote no message")
-    return verdict
+    return parse_verdict(await _generate(session, api_key, models, prompt, temperature=1.0))

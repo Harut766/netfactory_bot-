@@ -15,8 +15,12 @@ CREATE TABLE IF NOT EXISTS places (
 CREATE TABLE IF NOT EXISTS queries (
     query TEXT PRIMARY KEY,
     position INTEGER NOT NULL,
-    page_token TEXT,
-    exhausted INTEGER NOT NULL DEFAULT 0
+    done INTEGER NOT NULL DEFAULT 0
+);
+-- Places paid for on Apify, per local day.
+CREATE TABLE IF NOT EXISTS usage (
+    day TEXT PRIMARY KEY,
+    places INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS leads (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,23 +67,33 @@ class DB:
                 f"DELETE FROM queries WHERE query NOT IN ({','.join('?' * len(queries))})", queries
             )
 
-    def next_query(self) -> tuple[str, str | None] | None:
-        row = self.conn.execute(
-            "SELECT query, page_token FROM queries WHERE exhausted = 0 ORDER BY position LIMIT 1"
-        ).fetchone()
-        return (row["query"], row["page_token"]) if row else None
+    def next_queries(self, n: int) -> list[str]:
+        rows = self.conn.execute(
+            "SELECT query FROM queries WHERE done = 0 ORDER BY position LIMIT ?", (n,)
+        ).fetchall()
+        return [r["query"] for r in rows]
 
-    def advance_query(self, query: str, next_token: str | None) -> None:
+    def finish_queries(self, queries: list[str]) -> None:
         with self.conn:
-            self.conn.execute(
-                "UPDATE queries SET page_token = ?, exhausted = ? WHERE query = ?",
-                (next_token, int(next_token is None), query),
-            )
+            self.conn.executemany("UPDATE queries SET done = 1 WHERE query = ?", [(q,) for q in queries])
 
     def restart_queries(self) -> None:
         """All searches are done: start over to pick up businesses that appeared on Maps since."""
         with self.conn:
-            self.conn.execute("UPDATE queries SET page_token = NULL, exhausted = 0")
+            self.conn.execute("UPDATE queries SET done = 0")
+
+    # ---------- Apify budget ----------
+
+    def places_bought(self, day: str) -> int:
+        row = self.conn.execute("SELECT places FROM usage WHERE day = ?", (day,)).fetchone()
+        return row["places"] if row else 0
+
+    def add_places_bought(self, day: str, n: int) -> None:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO usage(day, places) VALUES (?, ?) ON CONFLICT(day) DO UPDATE SET places = places + ?",
+                (day, n, n),
+            )
 
     # ---------- places ----------
 

@@ -1,25 +1,13 @@
-"""Google Places API (New): Text Search."""
+"""Google Maps places through Apify's Google Maps Scraper (compass/crawler-google-places)."""
 
+import asyncio
 from dataclasses import dataclass
 
 import aiohttp
 
-SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
-_FIELDS = (
-    "id",
-    "displayName",
-    "formattedAddress",
-    "websiteUri",
-    "internationalPhoneNumber",
-    "rating",
-    "userRatingCount",
-    "primaryTypeDisplayName",
-    "businessStatus",
-    "googleMapsUri",
-)
-FIELD_MASK = ",".join(f"places.{f}" for f in _FIELDS) + ",nextPageToken"
-# Armenia's bounding box, so "Kentron" or "Armavir" never resolve to a place abroad.
-ARMENIA = {"rectangle": {"low": {"latitude": 38.8, "longitude": 43.4}, "high": {"latitude": 41.35, "longitude": 46.7}}}
+API = "https://api.apify.com/v2"
+ACTOR = "compass~crawler-google-places"
+RUN_TIMEOUT = 900
 
 
 @dataclass
@@ -33,37 +21,81 @@ class Place:
     reviews: int
     category: str
     maps_url: str
+    # Some scraper versions already return social links.
+    instagram: str = ""
 
 
 def parse_place(raw: dict) -> Place | None:
-    if raw.get("businessStatus", "OPERATIONAL") != "OPERATIONAL":
+    if not raw.get("placeId") or raw.get("permanentlyClosed") or raw.get("temporarilyClosed"):
         return None
+    instagrams = raw.get("instagrams") or []
     return Place(
-        id=raw["id"],
-        name=(raw.get("displayName") or {}).get("text", ""),
-        address=raw.get("formattedAddress", ""),
-        website=raw.get("websiteUri", ""),
-        phone=raw.get("internationalPhoneNumber", ""),
-        rating=raw.get("rating"),
-        reviews=int(raw.get("userRatingCount") or 0),
-        category=(raw.get("primaryTypeDisplayName") or {}).get("text", ""),
-        maps_url=raw.get("googleMapsUri", ""),
+        id=raw["placeId"],
+        name=raw.get("title") or "",
+        address=raw.get("address") or "",
+        website=raw.get("website") or "",
+        phone=raw.get("phone") or raw.get("phoneUnformatted") or "",
+        rating=raw.get("totalScore"),
+        reviews=int(raw.get("reviewsCount") or 0),
+        category=raw.get("categoryName") or "",
+        maps_url=raw.get("url") or "",
+        instagram=instagrams[0] if instagrams and isinstance(instagrams[0], str) else "",
     )
 
 
-async def search(
-    session: aiohttp.ClientSession, api_key: str, query: str, page_token: str | None = None
-) -> tuple[list[Place], str | None]:
-    """One page (up to 20 places) and the token of the next page, if any."""
-    body = {"textQuery": query, "languageCode": "hy", "regionCode": "AM", "pageSize": 20,
-            "locationRestriction": ARMENIA}
-    if page_token:
-        body["pageToken"] = page_token
-    headers = {"X-Goog-Api-Key": api_key, "X-Goog-FieldMask": FIELD_MASK}
-    async with session.post(SEARCH_URL, json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as r:
-        data = await r.json(content_type=None)
-        if r.status != 200:
-            msg = (data.get("error") or {}).get("message") if isinstance(data, dict) else None
-            raise RuntimeError(f"Google Places {r.status}: {msg or data}")
-    places = [p for p in map(parse_place, data.get("places", [])) if p]
-    return places, data.get("nextPageToken")
+async def _json(r: aiohttp.ClientResponse) -> dict:
+    data = await r.json(content_type=None)
+    if r.status >= 300:
+        err = (data.get("error") or {}).get("message") if isinstance(data, dict) else data
+        raise RuntimeError(f"Apify {r.status}: {err}")
+    return data
+
+
+async def search(session: aiohttp.ClientSession, token: str, queries: list[str], per_query: int,
+                 max_charge_usd: float) -> list[Place]:
+    """Runs the scraper once for several queries (one run = one start fee) and returns the places."""
+    params = {"token": token, "maxTotalChargeUsd": f"{max_charge_usd:.2f}"}
+    body = {
+        "searchStringsArray": queries,
+        "maxCrawledPlacesPerSearch": per_query,
+        "language": "en",
+        "skipClosedPlaces": True,
+        # Everything below costs extra per place; the listing already has what we need.
+        "scrapePlaceDetailPage": False,
+        "maxImages": 0,
+        "maxReviews": 0,
+        "scrapeContacts": False,
+    }
+    timeout = aiohttp.ClientTimeout(total=60)
+    async with session.post(f"{API}/acts/{ACTOR}/runs", params=params, json=body, timeout=timeout) as r:
+        run = (await _json(r))["data"]
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + RUN_TIMEOUT
+    while run["status"] in ("READY", "RUNNING"):
+        if loop.time() > deadline:
+            raise RuntimeError("Apify: поиск на картах идёт слишком долго")
+        await asyncio.sleep(10)
+        async with session.get(f"{API}/actor-runs/{run['id']}", params={"token": token}, timeout=timeout) as r:
+            run = (await _json(r))["data"]
+    # TIMED-OUT / ABORTED runs (e.g. the charge cap was hit) still keep what they scraped.
+    if run["status"] == "FAILED":
+        raise RuntimeError(f"Apify: поиск на картах завершился ошибкой ({run.get('statusMessage') or ''})")
+    async with session.get(
+        f"{API}/datasets/{run['defaultDatasetId']}/items", params={"token": token, "clean": "true"},
+        timeout=aiohttp.ClientTimeout(total=120),
+    ) as r:
+        items = await r.json(content_type=None)
+        if r.status >= 300:
+            raise RuntimeError(f"Apify {r.status}: {items}")
+    return [p for p in map(parse_place, items) if p]
+
+
+async def monthly_usage(session: aiohttp.ClientSession, token: str) -> float | None:
+    """Money spent on Apify this billing month, in USD; None if unknown."""
+    try:
+        async with session.get(f"{API}/users/me/limits", params={"token": token},
+                               timeout=aiohttp.ClientTimeout(total=30)) as r:
+            data = (await _json(r))["data"]
+        return float(data["current"]["monthlyUsageUsd"])
+    except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError, KeyError, TypeError, ValueError):
+        return None

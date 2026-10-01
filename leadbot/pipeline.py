@@ -13,9 +13,6 @@ from .db import DB
 
 log = logging.getLogger(__name__)
 
-# Safety limits for one run, so a bad day never burns the Google quota.
-MAX_PAGES_PER_RUN = 150
-CHECKS_PER_LEAD = 25
 MAX_LLM_ERRORS = 3
 
 
@@ -76,27 +73,40 @@ async def find_leads(
     want: int,
     is_cancelled: Callable[[], bool],
     notify: Callable[[str], Awaitable[None]],
+    today: str,
 ) -> AsyncIterator[Lead]:
-    ig = instagram.InstagramClient(session, cfg.apify_token)
-    found = checked = pages = llm_errors = restarts = 0
+    """`today` is the local date: the Apify budget is counted per day."""
+    ig = instagram.InstagramClient(session, cfg.apify_token if cfg.apify_instagram else "")
+    found = llm_errors = restarts = 0
     warned_blocked = False
 
+    used = await places.monthly_usage(session, cfg.apify_token)
+    if used is not None and used >= cfg.apify_monthly_budget:
+        await notify(f"⚠️ Бесплатный лимит Apify на этот месяц почти исчерпан (${used:.2f}). "
+                     "Новые компании появятся после обновления лимита в начале следующего месяца.")
+        return
+
     while found < want:
-        if pages >= MAX_PAGES_PER_RUN or checked >= want * CHECKS_PER_LEAD:
-            await notify(f"⚠️ Лимит одного запуска: проверено {checked} компаний. Остальное — в следующий раз.")
+        budget = cfg.places_per_day - db.places_bought(today)
+        if budget <= 0:
+            await notify(f"ℹ️ Дневной лимит Apify исчерпан ({cfg.places_per_day} компаний). "
+                         "Завтра продолжу с того же места.")
             return
-        nxt = db.next_query()
-        if nxt is None:
+        per_query = min(cfg.places_per_query, budget)
+        queries = db.next_queries(max(1, budget // per_query))
+        if not queries:
             restarts += 1
             if restarts > 1:
                 await notify("⚠️ Все поисковые запросы пройдены, новых компаний пока нет.")
                 return
             db.restart_queries()
             continue
-        query, token = nxt
-        batch, next_token = await places.search(session, cfg.google_api_key, query, token)
-        pages += 1
-        db.advance_query(query, next_token)
+        # Counted before the run: even a failed run may have been charged.
+        db.add_places_bought(today, per_query * len(queries))
+        # ~$5 per 1000 places on the free plan, plus a margin for the start fee.
+        batch = await places.search(session, cfg.apify_token, queries, per_query,
+                                    max_charge_usd=0.05 + per_query * len(queries) * 0.008)
+        db.finish_queries(queries)
 
         for place in batch:
             if found >= want:
@@ -105,12 +115,14 @@ async def find_leads(
                 raise Cancelled
             if db.place_checked(place.id):
                 continue
-            checked += 1
 
             if place.reviews > cfg.max_reviews:
                 db.mark_place(place.id, "old_reviews")
                 continue
-            handle, site = await instagram.find_handle(session, place.website)
+            if place.instagram:
+                handle, site = instagram.extract_handle(place.instagram), ""
+            else:
+                handle, site = await instagram.find_handle(session, place.website)
             if not handle:
                 db.mark_place(place.id, "no_instagram")
                 continue
@@ -126,7 +138,7 @@ async def find_leads(
                     warned_blocked = True
                     await notify(
                         "⚠️ Instagram временно блокирует проверку профилей. Лиды идут дальше, но активность "
-                        "аккаунтов не проверена. Решение: подождать пару часов или добавить APIFY_TOKEN."
+                        "аккаунтов не проверена. Обычно блок снимается через пару часов."
                     )
             except Exception as e:
                 # Not the place's fault: leave it unchecked so a later run retries it.
@@ -142,9 +154,7 @@ async def find_leads(
 
             context = build_context(place, handle, site, profile)
             try:
-                verdict = await llm.evaluate(
-                    session, cfg.gemini_api_key, cfg.gemini_models, context, datetime.now().date().isoformat()
-                )
+                verdict = await llm.evaluate(session, cfg.gemini_api_key, cfg.gemini_models, context, today)
             except llm.LLMError as e:
                 log.warning("gemini for %s: %s", place.name, e)
                 llm_errors += 1

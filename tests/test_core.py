@@ -87,10 +87,13 @@ def test_reject_reason():
     assert pipeline.reject_reason(_profile(5, private=True), NOW, c) == "ig_private"
 
 
-def test_parse_place_skips_closed():
-    raw = {"id": "a", "displayName": {"text": "Cafe"}, "userRatingCount": 12, "businessStatus": "OPERATIONAL"}
-    assert places.parse_place(raw).reviews == 12
-    assert places.parse_place(raw | {"businessStatus": "CLOSED_PERMANENTLY"}) is None
+def test_parse_place():
+    raw = {"placeId": "a", "title": "Cafe", "reviewsCount": 12, "totalScore": 4.5,
+           "instagrams": ["https://www.instagram.com/cafe.am/"]}
+    p = places.parse_place(raw)
+    assert (p.name, p.reviews, p.instagram) == ("Cafe", 12, "https://www.instagram.com/cafe.am/")
+    assert places.parse_place(raw | {"permanentlyClosed": True}) is None
+    assert places.parse_place({"title": "no id"}) is None
 
 
 # ---------- llm ----------
@@ -109,21 +112,27 @@ def test_parse_verdict():
 
 def test_queries_progress():
     db = DB(":memory:")
-    db.sync_queries(["a", "b"])
-    assert db.next_query() == ("a", None)
-    db.advance_query("a", "tok")
-    assert db.next_query() == ("a", "tok")
-    db.advance_query("a", None)
-    db.advance_query("b", None)
-    assert db.next_query() is None
+    db.sync_queries(["a", "b", "c"])
+    assert db.next_queries(2) == ["a", "b"]
+    db.finish_queries(["a", "b"])
+    assert db.next_queries(2) == ["c"]
+    db.finish_queries(["c"])
+    assert db.next_queries(2) == []
     db.restart_queries()
-    assert db.next_query() == ("a", None)
+    assert db.next_queries(1) == ["a"]
     # A new query inserted before existing ones keeps the order and the progress of the rest.
-    db.advance_query("a", "tok2")
-    db.sync_queries(["new", "a"])
-    assert db.next_query() == ("new", None)
-    db.advance_query("new", None)
-    assert db.next_query() == ("a", "tok2")
+    db.finish_queries(["a"])
+    db.sync_queries(["new", "a", "b"])
+    assert db.next_queries(5) == ["new", "b"]
+
+
+def test_apify_budget():
+    db = DB(":memory:")
+    assert db.places_bought("2026-10-01") == 0
+    db.add_places_bought("2026-10-01", 30)
+    db.add_places_bought("2026-10-01", 5)
+    assert db.places_bought("2026-10-01") == 35
+    assert db.places_bought("2026-10-02") == 0
 
 
 def test_leads_flow():
@@ -165,24 +174,22 @@ def test_format_card_escapes():
 
 # ---------- pipeline (network replaced with fakes) ----------
 
-def test_find_leads(monkeypatch):
+def _fake_place(i, reviews=10, site="", ig=""):
+    return places.Place(id=f"p{i}", name=f"N{i}", address="", website=site, phone="", rating=None,
+                        reviews=reviews, category="", maps_url="", instagram=ig)
+
+
+def _run_find_leads(monkeypatch, batch, want=5, usage=0.0):
     import asyncio
 
-    def place(i, reviews=10, site=""):
-        return places.Place(id=f"p{i}", name=f"N{i}", address="", website=site, phone="", rating=None,
-                            reviews=reviews, category="", maps_url="")
+    calls = []
 
-    batch = [
-        place(1, reviews=999, site="https://instagram.com/old"),  # too many reviews
-        place(2),  # no website, no instagram
-        place(3, site="https://instagram.com/inactive"),
-        place(4, site="https://instagram.com/good"),
-        place(5, site="https://instagram.com/notfit"),
-        place(6, site="https://instagram.com/good"),  # same account as p4
-    ]
+    async def fake_search(session, token, queries, per_query, max_charge_usd):
+        calls.append((list(queries), per_query))
+        return batch if len(calls) == 1 else []
 
-    async def fake_search(session, key, query, token):
-        return batch, None
+    async def fake_usage(session, token):
+        return usage
 
     async def fake_profile(self, handle):
         return _profile(90 if handle == "inactive" else 2)
@@ -192,22 +199,45 @@ def test_find_leads(monkeypatch):
         return llm.Verdict(fit=fit, score=8 if fit else 2, reason="r", idea="i", message="Բարև" if fit else "")
 
     monkeypatch.setattr(places, "search", fake_search)
+    monkeypatch.setattr(places, "monthly_usage", fake_usage)
     monkeypatch.setattr(instagram.InstagramClient, "profile", fake_profile)
     monkeypatch.setattr(llm, "evaluate", fake_evaluate)
 
     db = DB(":memory:")
-    db.sync_queries(["q1"])
+    db.sync_queries([f"q{i}" for i in range(10)])
     notes = []
 
     async def notify(text):
         notes.append(text)
 
     async def collect():
-        return [lead async for lead in pipeline.find_leads(cfg(), db, None, 5, lambda: False, notify)]
+        return [lead async for lead in pipeline.find_leads(cfg(), db, None, want, lambda: False, notify,
+                                                           "2026-10-01")]
 
     leads = asyncio.run(collect())
+    return db, leads, calls, notes
+
+
+def test_find_leads(monkeypatch):
+    batch = [
+        _fake_place(1, reviews=999, site="https://instagram.com/old"),  # too many reviews
+        _fake_place(2),  # no website, no instagram
+        _fake_place(3, site="https://instagram.com/inactive"),
+        _fake_place(4, ig="https://www.instagram.com/good/"),
+        _fake_place(5, site="https://instagram.com/notfit"),
+        _fake_place(6, site="https://instagram.com/good"),  # same account as p4
+    ]
+    db, leads, calls, notes = _run_find_leads(monkeypatch, batch)
     assert [db.lead(lead.id)["instagram"] for lead in leads] == ["good"]
     s = db.stats("2000-01-01")["places"]
     assert s == {"old_reviews": 1, "no_instagram": 1, "ig_inactive": 1, "lead": 1, "not_fit": 1, "duplicate": 1}
-    # The only query ran out twice in a row: the run stops and says so.
-    assert any("новых компаний пока нет" in n for n in notes)
+    # The daily budget (35 places) is spent in two runs: 3 queries × 10, then 1 query × 5.
+    assert calls == [(["q0", "q1", "q2"], 10), (["q3"], 5)]
+    assert db.places_bought("2026-10-01") == 35
+    assert any("Дневной лимит" in n for n in notes)
+
+
+def test_find_leads_stops_when_month_budget_spent(monkeypatch):
+    db, leads, calls, notes = _run_find_leads(monkeypatch, [], usage=4.9)
+    assert leads == [] and calls == []
+    assert any("лимит Apify на этот месяц" in n for n in notes)

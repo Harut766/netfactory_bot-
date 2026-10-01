@@ -11,7 +11,7 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import BotCommand, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, User
 
-from . import llm, pipeline
+from . import llm, pipeline, places
 from .config import Config
 from .db import DB
 from .queries import all_queries
@@ -126,7 +126,7 @@ async def run(bot: Bot, chat_id: int, want: int) -> None:
         return
     async with run_lock:
         cancel_requested = False
-        status = await bot.send_message(chat_id, f"🔎 Ищу {want} лидов… Это займёт 10–30 минут.")
+        status = await bot.send_message(chat_id, f"🔎 Ищу до {want} лидов… Это займёт 5–20 минут.")
         found = 0
 
         async def notify(text: str) -> None:
@@ -134,7 +134,8 @@ async def run(bot: Bot, chat_id: int, want: int) -> None:
 
         try:
             async with aiohttp.ClientSession(trust_env=True) as session:
-                leads = pipeline.find_leads(cfg, db, session, want, lambda: cancel_requested, notify)
+                today = datetime.now(ZoneInfo(cfg.timezone)).date().isoformat()
+                leads = pipeline.find_leads(cfg, db, session, want, lambda: cancel_requested, notify, today)
                 async for lead in leads:
                     await send_card(bot, chat_id, lead.id)
                     found += 1
@@ -193,7 +194,7 @@ async def start(message: Message) -> None:
     schedule = f"по расписанию в {cfg.daily_time}" if cfg.daily_time else "по команде"
     await message.answer(
         "Я ищу новые активные армянские бизнесы и готовлю для них сообщение в Instagram от NetFactory.\n\n"
-        f"Лиды приходят {schedule} ({cfg.daily_leads} шт.).\n"
+        f"Лиды приходят {schedule} (до {cfg.daily_leads} шт., в пределах бесплатного лимита Apify).\n"
         "Под каждым лидом: ✅ Отправил · 🔄 Другой текст · ❌ Не подходит.\n\n"
         "/leads — найти лиды сейчас (/leads 5 — пять штук)\n"
         "/stop — остановить поиск\n"
@@ -235,8 +236,14 @@ async def stats(message: Message) -> None:
     midnight = datetime.now(ZoneInfo(cfg.timezone)).replace(hour=0, minute=0, second=0, microsecond=0)
     s = db.stats(midnight.astimezone(timezone.utc).isoformat(timespec="seconds"))
     leads = s["leads"]
+    async with aiohttp.ClientSession(trust_env=True) as session:
+        used = await places.monthly_usage(session, cfg.apify_token)
+    apify = f"Apify: сегодня {db.places_bought(midnight.date().isoformat())}/{cfg.places_per_day} компаний"
+    if used is not None:
+        apify += f", за месяц ${used:.2f} из ${cfg.apify_monthly_budget:.2f}"
     lines = [
         f"📊 <b>Сегодня:</b> найдено {s['today']}, отправлено {s['sent_today']}",
+        apify,
         f"<b>Всего лидов:</b> {sum(leads.values())} — отправлено {leads.get('sent', 0)}, "
         f"ждут {leads.get('new', 0)}, отклонено {leads.get('rejected', 0)}",
         f"<b>Проверено компаний:</b> {sum(s['places'].values())}",
@@ -289,7 +296,7 @@ async def on_regen(call: CallbackQuery) -> None:
 
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    missing = [k for k, v in (("GOOGLE_API_KEY", cfg.google_api_key), ("GEMINI_API_KEY", cfg.gemini_api_key),
+    missing = [k for k, v in (("APIFY_TOKEN", cfg.apify_token), ("GEMINI_API_KEY", cfg.gemini_api_key),
                               ("ALLOWED_USERS", cfg.allowed_users)) if not v]
     if missing:
         raise SystemExit(f"Заполните в .env: {', '.join(missing)}")

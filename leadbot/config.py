@@ -13,12 +13,18 @@ class Config:
     allowed_users: frozenset[int]
     # Chat that receives the daily leads: a group with the team, or one person. Defaults to the first allowed user.
     leads_chat_id: int
-    google_api_key: str
     gemini_api_key: str
     # Tried in order: the first one that answers wins.
     gemini_models: tuple[str, ...]
-    # Optional: used for Instagram profiles when Instagram blocks direct requests.
+    # Apify: Google Maps search (and optionally Instagram profiles when Instagram blocks direct requests).
     apify_token: str
+    # Budget for the free Apify plan ($5 a month): places scraped per day, per search query,
+    # and the monthly spend at which searching stops.
+    places_per_day: int
+    places_per_query: int
+    apify_monthly_budget: float
+    # Read Instagram profiles through Apify when Instagram blocks us. Costs extra, so off by default.
+    apify_instagram: bool
     daily_leads: int
     # "HH:MM" in `timezone`; empty disables the daily run.
     daily_time: str
@@ -42,7 +48,6 @@ class Config:
             bot_token=os.environ["BOT_TOKEN"],
             allowed_users=frozenset(allowed),
             leads_chat_id=int(chat) if chat else (allowed[0] if allowed else 0),
-            google_api_key=os.environ.get("GOOGLE_API_KEY", ""),
             gemini_api_key=os.environ.get("GEMINI_API_KEY", ""),
             gemini_models=tuple(
                 m.strip()
@@ -50,7 +55,11 @@ class Config:
                 if m.strip()
             ),
             apify_token=os.environ.get("APIFY_TOKEN", ""),
-            daily_leads=int(os.environ.get("DAILY_LEADS", "30")),
+            places_per_day=int(os.environ.get("APIFY_PLACES_PER_DAY", "35")),
+            places_per_query=int(os.environ.get("APIFY_PLACES_PER_QUERY", "10")),
+            apify_monthly_budget=float(os.environ.get("APIFY_MONTHLY_BUDGET", "4.5")),
+            apify_instagram=os.environ.get("APIFY_INSTAGRAM", "").strip().lower() in ("1", "true", "yes"),
+            daily_leads=int(os.environ.get("DAILY_LEADS", "10")),
             daily_time=os.environ.get("DAILY_TIME", "10:00").strip(),
             daily_weekdays=frozenset(_ids(os.environ.get("DAILY_WEEKDAYS", "1,2,3,4,5"))),
             timezone=os.environ.get("TIMEZONE", "Asia/Yerevan"),

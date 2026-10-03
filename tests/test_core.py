@@ -159,9 +159,15 @@ def test_leads_flow():
     assert s["leads"] == {"sent": 1} and s["sent_today"] == 1
 
 
-def test_all_queries_unique():
+def test_all_queries_unique_and_mixed():
+    from leadbot.queries import CATEGORIES
+
     q = all_queries()
     assert len(q) == len(set(q)) > 500
+    assert q == all_queries()  # stable between restarts
+    # One day (8 queries) covers several niches, not one block of similar ones.
+    first_day = {next(c for c in CATEGORIES if x.startswith(c + " in ")) for x in q[:8]}
+    assert len(first_day) >= 6
 
 
 # ---------- telegram card ----------
@@ -270,8 +276,8 @@ def test_find_leads(monkeypatch):
     assert cards[-1]["context"]["has_web_app"] is True and cards[-2]["context"]["fit"] is False
     assert cards[0]["summary"] == "s" and cards[0]["context"]["web_presence"] == "w"
     assert db.stats("2000-01-01")["places"] == {"lead": 6, "duplicate": 1}
-    # The daily budget (40 places) goes into one run of 4 queries × 10.
-    assert calls == [(["q0", "q1", "q2", "q3"], 10)]
+    # The daily budget (40 places) goes into one run of 8 queries × 5.
+    assert calls == [([f"q{i}" for i in range(8)], 5)]
     assert db.places_bought("2026-10-01") == 40
     assert any("Дневной лимит" in n for n in notes)
 
@@ -280,7 +286,7 @@ def test_find_leads_keeps_unprocessed_places(monkeypatch):
     batch = [_fake_place(i, ig=f"https://instagram.com/shop{i}") for i in range(5)]
     db, leads, calls, notes, seen = _run_find_leads(monkeypatch, batch, want=2)
     # Only as many places as needed are bought...
-    assert calls == [(["q0"], 10)]
+    assert calls == [(["q0"], 5)]
     assert len(leads) == 2
     # ...and the rest wait for the next run instead of being thrown away.
     assert db.pending_count() == 3
@@ -297,8 +303,8 @@ def test_find_leads_with_filters(monkeypatch):
     db, leads, calls, notes, seen = _run_find_leads(monkeypatch, batch, want=40, config=config)
     assert [db.lead(lead.id)["instagram"] for lead in leads] == ["good"]
     assert db.stats("2000-01-01")["places"] == {"old_reviews": 1, "ig_inactive": 1, "lead": 1}
-    # 35 places: 3 queries × 10, then 1 query × 5.
-    assert calls == [(["q0", "q1", "q2"], 10), (["q3"], 5)]
+    # 35 places: 7 queries × 5.
+    assert calls == [([f"q{i}" for i in range(7)], 5)]
 
 
 def test_find_leads_stops_when_month_budget_spent(monkeypatch):

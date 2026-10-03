@@ -1,5 +1,7 @@
 """Google Maps searches that cover Armenian businesses. No niche is preferred, so the list is broad."""
 
+import random
+
 CATEGORIES = (
     "beauty salon",
     "barbershop",
@@ -87,5 +89,8 @@ LOCATIONS = (
 
 
 def all_queries() -> list[str]:
-    # Location-major order: one pass touches every category before moving on to the next district.
-    return [f"{c} in {loc}" for loc in LOCATIONS for c in CATEGORIES]
+    """Every category in every location, in a fixed shuffled order so that each day brings a mix of niches
+    and districts rather than, say, only clinics. The seed keeps the order stable between restarts."""
+    queries = [f"{c} in {loc}" for loc in LOCATIONS for c in CATEGORIES]
+    random.Random(2026).shuffle(queries)
+    return queries

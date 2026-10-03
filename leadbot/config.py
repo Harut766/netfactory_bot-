@@ -60,7 +60,7 @@ class Config:
             ),
             apify_token=os.environ.get("APIFY_TOKEN", ""),
             places_per_day=int(os.environ.get("APIFY_PLACES_PER_DAY", "40")),
-            places_per_query=int(os.environ.get("APIFY_PLACES_PER_QUERY", "10")),
+            places_per_query=int(os.environ.get("APIFY_PLACES_PER_QUERY", "5")),
             apify_monthly_budget=float(os.environ.get("APIFY_MONTHLY_BUDGET", "4.5")),
             apify_instagram=os.environ.get("APIFY_INSTAGRAM", "").strip().lower() in ("1", "true", "yes"),
             meta_token=os.environ.get("META_ACCESS_TOKEN", "").strip(),
